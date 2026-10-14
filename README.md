@@ -45,7 +45,7 @@ Edit `.env` and fill in **one** provider:
 
 | Provider | `.env` settings | Default model |
 |---|---|---|
-| Google Gemini | `LLM_PROVIDER=gemini`, `GEMINI_API_KEY=...` | `gemini-2.5-flash` |
+| Google Gemini | `LLM_PROVIDER=gemini`, `GEMINI_API_KEY=...` | `gemini-3.8-flash` |
 | Anthropic | `LLM_PROVIDER=anthropic`, `ANTHROPIC_API_KEY=...` | `claude-sonnet-5-5` |
 | OpenAI | `LLM_PROVIDER=openai`, `OPENAI_API_KEY=...` | `gpt-4.1` |
 | Groq | `LLM_PROVIDER=groq`, `GROQ_API_KEY=...` | `llama-3.3-70b-versatile` |
