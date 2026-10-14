@@ -85,6 +85,12 @@ _TRANSIENT_HINTS = ("rate", "429", "500", "502", "503", "504", "overloaded", "ti
                     "temporarily", "connection", "unavailable", "resource_exhausted")
 
 
+def _is_overload_message(msg: str) -> bool:
+    low = msg.lower()
+    return any(h in low for h in ("503", "unavailable", "high demand", "overloaded", "timed out", "timeout",
+                                  "429", "resource_exhausted", "rate"))
+
+
 def _is_timeout(exc: Exception) -> bool:
     return "timeout" in type(exc).__name__.lower() or "timed out" in str(exc).lower()
 
@@ -225,7 +231,7 @@ class AnthropicClient:
 class OpenAICompatibleClient:
     def __init__(self, provider: str, api_key: str | None, model: str, base_url: str | None,
                  max_tokens: int = 4096, timeout: float = 120.0, temperature: float | None = None,
-                 reasoning_effort: str | None = None) -> None:
+                 reasoning_effort: str | None = None, fallback_model: str | None = None) -> None:
         try:
             import openai  # noqa: PLC0415 - optional dependency, imported lazily
         except ImportError as exc:
@@ -237,11 +243,14 @@ class OpenAICompatibleClient:
         # Thinking models (e.g. Gemini 3.x) can spend minutes "thinking" per call; the agent makes
         # many small decisions, so low effort keeps each step fast. Dropped automatically if rejected.
         self.reasoning_effort = reasoning_effort or None
+        # Used once if the primary model stays overloaded/unavailable, so a long audit is not lost.
+        self.fallback_model = fallback_model if fallback_model and fallback_model != model else None
         self._client = openai.OpenAI(api_key=api_key or "not-needed", base_url=base_url,
                                      timeout=timeout, max_retries=0)
 
     @staticmethod
-    def _convert(system: str, messages: list[dict[str, Any]], provider: str = "") -> list[dict[str, Any]]:
+    def _convert(system: str, messages: list[dict[str, Any]], provider: str = "",
+                 model: str | None = None) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = [{"role": "system", "content": system}]
         for m in messages:
             if m["role"] == "user":
@@ -253,8 +262,12 @@ class OpenAICompatibleClient:
                     for idx, tc in enumerate(m["tool_calls"]):
                         call = {"id": tc["id"], "type": "function",
                                 "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])}}
-                        extra = (tc.get("provider_data") or {}).get("extra_content")
-                        if extra:
+                        pdata = tc.get("provider_data") or {}
+                        extra = pdata.get("extra_content")
+                        # Signatures are only valid for the model that produced them (matters after a
+                        # fallback switch); otherwise the placeholder below is used.
+                        same_model = model is None or pdata.get("model") in (None, model)
+                        if extra and same_model:
                             call["extra_content"] = extra  # echo Gemini thought signature verbatim
                         elif provider == "gemini" and idx == 0:
                             # Gemini 3 requires a signature on the first call of each turn; this documented
@@ -267,9 +280,19 @@ class OpenAICompatibleClient:
         return out
 
     def complete(self, system, messages, tools):  # noqa: ANN001,ANN201
+        try:
+            return self._complete(system, messages, tools)
+        except LLMError as exc:
+            if not self.fallback_model or not _is_overload_message(str(exc)):
+                raise
+            _notify(f"model {self.model} unavailable; switching to fallback model {self.fallback_model}")
+            self.model, self.fallback_model = self.fallback_model, None
+            return self._complete(system, messages, tools)
+
+    def _complete(self, system, messages, tools):  # noqa: ANN001,ANN202
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "messages": self._convert(system, messages, self.provider),
+            "messages": self._convert(system, messages, self.provider, self.model),
             "tools": [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                         "parameters": t["parameters"]}} for t in tools],
             "tool_choice": "auto",
@@ -302,8 +325,11 @@ class OpenAICompatibleClient:
                     args = {"__invalid_arguments__": raw[:500]}
             except json.JSONDecodeError:
                 args = {"__invalid_arguments__": raw[:500]}
+            pdata = _extra_content(tc)
+            if pdata:
+                pdata["model"] = self.model
             calls.append(ToolCall(id=tc.id or f"call_{i}", name=tc.function.name, arguments=args,
-                                  provider_data=_extra_content(tc)))
+                                  provider_data=pdata))
         usage = {}
         if getattr(resp, "usage", None) is not None:
             usage = {"input_tokens": getattr(resp.usage, "prompt_tokens", 0) or 0,
@@ -352,4 +378,5 @@ def create_client(provider: str | None = None, model: str | None = None) -> LLMC
         effort = "low" if provider in ("gemini", "openai") else ""
     return OpenAICompatibleClient(provider, api_key, model, base_url, max_tokens=max_tokens,
                                   timeout=timeout, temperature=temperature,
-                                  reasoning_effort=effort.strip().lower() or None)
+                                  reasoning_effort=effort.strip().lower() or None,
+                                  fallback_model=(os.getenv("LLM_FALLBACK_MODEL") or "").strip() or None)

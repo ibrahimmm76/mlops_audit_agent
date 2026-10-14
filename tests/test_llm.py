@@ -188,7 +188,7 @@ class ThoughtSignatureTests(unittest.TestCase):
             client = llm_mod.OpenAICompatibleClient("gemini", "k", "m", None)
             resp = client.complete("SYS", [{"role": "user", "content": "go"}], TOOLS)
             tc = resp.tool_calls[0]
-            self.assertEqual(tc.provider_data, {"extra_content": sig})
+            self.assertEqual(tc.provider_data, {"extra_content": sig, "model": "m"})
             history = [
                 {"role": "user", "content": "go"},
                 {"role": "assistant", "content": "",
@@ -209,6 +209,59 @@ class ThoughtSignatureTests(unittest.TestCase):
         self.assertNotIn("extra_content", gem[1])
         groq = llm_mod.OpenAICompatibleClient._convert("S", msgs, "groq")[1]["tool_calls"]
         self.assertNotIn("extra_content", groq[0])
+
+
+class FallbackModelTests(unittest.TestCase):
+    def test_switches_to_fallback_on_overload_and_drops_stale_signatures(self):
+        sent = []
+
+        class Unavailable(Exception):
+            status_code = 503
+
+        class Completions:
+            def create(self, **kwargs):
+                sent.append(kwargs)
+                if kwargs["model"] == "busy-model":
+                    raise Unavailable("Error code: 503 - This model is currently experiencing high demand")
+                call = NS(id="t2", function=NS(name="read_file", arguments='{"path": "a.py"}'))
+                return NS(choices=[NS(message=NS(content="", tool_calls=[call]), finish_reason="tool_calls")],
+                          usage=None)
+
+        history = [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "t1", "name": "list_files", "arguments": {},
+                "provider_data": {"extra_content": {"google": {"thought_signature": "OLD"}},
+                                  "model": "busy-model"}}]},
+            {"role": "tool", "tool_call_id": "t1", "name": "list_files", "content": "a.py"},
+        ]
+        fake = types.SimpleNamespace(OpenAI=lambda **kw: NS(chat=NS(completions=Completions())))
+        with mock.patch.dict(sys.modules, {"openai": fake}), mock.patch("sys.stderr"), \
+                mock.patch("audit_agent.llm.time.sleep"):
+            client = llm_mod.OpenAICompatibleClient("gemini", "k", "busy-model", None,
+                                                    fallback_model="spare-model")
+            resp = client.complete("SYS", history, TOOLS)
+        self.assertEqual(client.model, "spare-model")
+        self.assertEqual(resp.tool_calls[0].name, "read_file")
+        last = sent[-1]
+        self.assertEqual(last["model"], "spare-model")
+        sig = last["messages"][2]["tool_calls"][0]["extra_content"]["google"]["thought_signature"]
+        self.assertEqual(sig, "skip_thought_signature_validator")  # old model's signature not reused
+
+    def test_no_fallback_for_auth_errors(self):
+        class AuthError(Exception):
+            status_code = 401
+
+        class Completions:
+            def create(self, **kwargs):
+                raise AuthError("Error code: 401 - API key not valid")
+
+        fake = types.SimpleNamespace(OpenAI=lambda **kw: NS(chat=NS(completions=Completions())))
+        with mock.patch.dict(sys.modules, {"openai": fake}), mock.patch("sys.stderr"):
+            client = llm_mod.OpenAICompatibleClient("gemini", "k", "m1", None, fallback_model="m2")
+            with self.assertRaises(LLMError):
+                client.complete("SYS", [{"role": "user", "content": "go"}], TOOLS)
+        self.assertEqual(client.model, "m1")
 
 
 class FactoryTests(unittest.TestCase):
