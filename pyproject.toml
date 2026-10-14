@@ -1,0 +1,37 @@
+[project]
+name = "devops-audit-agent"
+version = "1.0.0"
+description = "LLM-driven agent that audits GitHub repositories for DevOps best-practice violations"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40,<2",
+    "openai>=1.40,<3",
+    "PyYAML>=6.0,<7",
+    "python-dotenv>=1.0,<2",
+    "ruff>=0.5,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["tests/fixtures"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+ignore = [
+    "S101",  # assert is fine in tests and for internal invariants
+    "S603",  # subprocess calls use fixed argument lists, never a shell
+    "S607",  # git/ruff are resolved from PATH on purpose
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S108", "E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,288 @@
+"""Thin LLM provider adapters.
+
+Only the official provider SDKs are used (``anthropic`` and ``openai``); there
+is no agent framework.  The agent loop talks to a provider-neutral interface:
+
+    LLMClient.complete(system, messages, tools) -> LLMResponse
+
+Neutral message format used by the loop::
+
+    {"role": "user", "content": str}
+    {"role": "assistant", "content": str | None,
+     "tool_calls": [{"id": str, "name": str, "arguments": dict}]}
+    {"role": "tool", "tool_call_id": str, "name": str, "content": str}
+
+Supported providers (``LLM_PROVIDER``): anthropic, openai, gemini, groq,
+openrouter, ollama.  Everything except Anthropic uses the OpenAI-compatible
+chat-completions API.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+from .redact import redact_text
+
+
+class LLMError(RuntimeError):
+    """Fatal LLM/provider error (bad key, quota, unreachable after retries)."""
+
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass
+class LLMResponse:
+    text: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    stop_reason: str | None = None
+    usage: dict[str, int] = field(default_factory=dict)
+
+
+class LLMClient(Protocol):
+    provider: str
+    model: str
+
+    def complete(
+        self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> LLMResponse: ...
+
+
+PROVIDERS: dict[str, dict[str, str | None]] = {
+    "anthropic": {"key_env": "ANTHROPIC_API_KEY", "base_url": None, "model": "claude-sonnet-5-5"},
+    "openai": {"key_env": "OPENAI_API_KEY", "base_url": None, "model": "gpt-4.1"},
+    "gemini": {
+        "key_env": "GEMINI_API_KEY",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "model": "gemini-2.5-flash",
+    },
+    "groq": {
+        "key_env": "GROQ_API_KEY",
+        "base_url": "https://api.groq.com/openai/v1",
+        "model": "llama-3.3-70b-versatile",
+    },
+    "openrouter": {
+        "key_env": "OPENROUTER_API_KEY",
+        "base_url": "https://openrouter.ai/api/v1",
+        "model": "anthropic/claude-sonnet-4.5",
+    },
+    "ollama": {"key_env": None, "base_url": "http://localhost:11434/v1", "model": "qwen2.5:14b"},
+}
+
+_TRANSIENT_HINTS = ("rate", "429", "500", "502", "503", "504", "overloaded", "timeout", "temporarily",
+                    "connection")
+
+
+def _retrying(fn, attempts: int = 6, base_delay: float = 2.0):  # noqa: ANN001,ANN202
+    """Call ``fn`` with exponential backoff on transient provider errors."""
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except LLMError:
+            raise
+        except Exception as exc:  # provider SDK exceptions vary
+            last = exc
+            msg = str(exc).lower()
+            status = getattr(exc, "status_code", None)
+            transient = (status in (408, 409, 429) or (isinstance(status, int) and status >= 500)
+                         or any(h in msg for h in _TRANSIENT_HINTS))
+            if status in (400, 401, 403, 404) or not transient or i == attempts - 1:
+                break
+            time.sleep(min(base_delay * (2 ** i), 40.0))  # free tiers have per-minute limits
+    raise LLMError(f"LLM request failed: {redact_text(type(last).__name__ + ': ' + str(last))[:500]}")
+
+
+# --------------------------------------------------------------------------- #
+# Anthropic
+# --------------------------------------------------------------------------- #
+class AnthropicClient:
+    provider = "anthropic"
+
+    def __init__(self, api_key: str, model: str, max_tokens: int = 4096, timeout: float = 120.0,
+                 temperature: float | None = None) -> None:
+        try:
+            import anthropic  # noqa: PLC0415 - optional dependency, imported lazily
+        except ImportError as exc:
+            raise LLMError("The 'anthropic' package is not installed: pip install -r requirements.txt") from exc
+        self._client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=2)
+        self.model = model
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+
+    @staticmethod
+    def _convert(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for m in messages:
+            role = m["role"]
+            if role == "user":
+                block = {"type": "text", "text": m["content"]}
+                if out and out[-1]["role"] == "user":
+                    out[-1]["content"].append(block)
+                else:
+                    out.append({"role": "user", "content": [block]})
+            elif role == "assistant":
+                content: list[dict[str, Any]] = []
+                if m.get("content"):
+                    content.append({"type": "text", "text": m["content"]})
+                for tc in m.get("tool_calls") or []:
+                    content.append({"type": "tool_use", "id": tc["id"], "name": tc["name"],
+                                    "input": tc["arguments"]})
+                if not content:
+                    content.append({"type": "text", "text": "(continuing)"})
+                out.append({"role": "assistant", "content": content})
+            elif role == "tool":
+                block = {"type": "tool_result", "tool_use_id": m["tool_call_id"], "content": m["content"]}
+                if out and out[-1]["role"] == "user":
+                    out[-1]["content"].append(block)
+                else:
+                    out.append({"role": "user", "content": [block]})
+        return out
+
+    def complete(self, system, messages, tools):  # noqa: ANN001,ANN201
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "system": system,
+            "messages": self._convert(messages),
+            "tools": [
+                {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
+                for t in tools
+            ],
+        }
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+
+        resp = _retrying(lambda: self._client.messages.create(**kwargs))
+        text_parts: list[str] = []
+        calls: list[ToolCall] = []
+        for block in resp.content:
+            btype = getattr(block, "type", None)
+            if btype == "text":
+                text_parts.append(block.text)
+            elif btype == "tool_use":
+                args = block.input if isinstance(block.input, dict) else {}
+                calls.append(ToolCall(id=block.id, name=block.name, arguments=args))
+        usage = {}
+        if getattr(resp, "usage", None) is not None:
+            usage = {"input_tokens": getattr(resp.usage, "input_tokens", 0) or 0,
+                     "output_tokens": getattr(resp.usage, "output_tokens", 0) or 0}
+        return LLMResponse(text="\n".join(text_parts).strip(), tool_calls=calls,
+                           stop_reason=getattr(resp, "stop_reason", None), usage=usage)
+
+
+# --------------------------------------------------------------------------- #
+# OpenAI-compatible (OpenAI, Gemini, Groq, OpenRouter, Ollama)
+# --------------------------------------------------------------------------- #
+class OpenAICompatibleClient:
+    def __init__(self, provider: str, api_key: str | None, model: str, base_url: str | None,
+                 max_tokens: int = 4096, timeout: float = 120.0, temperature: float | None = None) -> None:
+        try:
+            import openai  # noqa: PLC0415 - optional dependency, imported lazily
+        except ImportError as exc:
+            raise LLMError("The 'openai' package is not installed: pip install -r requirements.txt") from exc
+        self.provider = provider
+        self.model = model
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self._client = openai.OpenAI(api_key=api_key or "not-needed", base_url=base_url,
+                                     timeout=timeout, max_retries=2)
+
+    @staticmethod
+    def _convert(system: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = [{"role": "system", "content": system}]
+        for m in messages:
+            if m["role"] == "user":
+                out.append({"role": "user", "content": m["content"]})
+            elif m["role"] == "assistant":
+                msg: dict[str, Any] = {"role": "assistant", "content": m.get("content") or ""}
+                if m.get("tool_calls"):
+                    msg["tool_calls"] = [
+                        {"id": tc["id"], "type": "function",
+                         "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])}}
+                        for tc in m["tool_calls"]
+                    ]
+                out.append(msg)
+            elif m["role"] == "tool":
+                out.append({"role": "tool", "tool_call_id": m["tool_call_id"], "content": m["content"]})
+        return out
+
+    def complete(self, system, messages, tools):  # noqa: ANN001,ANN201
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": self._convert(system, messages),
+            "tools": [{"type": "function", "function": {"name": t["name"], "description": t["description"],
+                                                        "parameters": t["parameters"]}} for t in tools],
+            "tool_choice": "auto",
+            "max_tokens": self.max_tokens,
+        }
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        resp = _retrying(lambda: self._client.chat.completions.create(**kwargs))
+        if not resp.choices:
+            raise LLMError("LLM returned no choices")
+        choice = resp.choices[0]
+        msg = choice.message
+        calls: list[ToolCall] = []
+        for i, tc in enumerate(getattr(msg, "tool_calls", None) or []):
+            raw = tc.function.arguments or "{}"
+            try:
+                args = json.loads(raw)
+                if not isinstance(args, dict):
+                    args = {"__invalid_arguments__": raw[:500]}
+            except json.JSONDecodeError:
+                args = {"__invalid_arguments__": raw[:500]}
+            calls.append(ToolCall(id=tc.id or f"call_{i}", name=tc.function.name, arguments=args))
+        usage = {}
+        if getattr(resp, "usage", None) is not None:
+            usage = {"input_tokens": getattr(resp.usage, "prompt_tokens", 0) or 0,
+                     "output_tokens": getattr(resp.usage, "completion_tokens", 0) or 0}
+        return LLMResponse(text=(msg.content or "").strip(), tool_calls=calls,
+                           stop_reason=choice.finish_reason, usage=usage)
+
+
+def create_client(provider: str | None = None, model: str | None = None) -> LLMClient:
+    """Build a client from arguments and environment variables.
+
+    Provider resolution: explicit argument > ``LLM_PROVIDER`` > first provider
+    whose API key environment variable is set.
+    """
+    provider = (provider or os.getenv("LLM_PROVIDER") or "").strip().lower()
+    if not provider:
+        for name, cfg in PROVIDERS.items():
+            if cfg["key_env"] and os.getenv(cfg["key_env"] or ""):
+                provider = name
+                break
+    if not provider:
+        raise LLMError(
+            "No LLM configured. Set LLM_PROVIDER and the matching API key in .env "
+            "(e.g. ANTHROPIC_API_KEY=...). See .env.example."
+        )
+    if provider not in PROVIDERS:
+        raise LLMError(f"Unknown LLM_PROVIDER {provider!r}; choose one of {sorted(PROVIDERS)}")
+
+    cfg = PROVIDERS[provider]
+    model = model or os.getenv("LLM_MODEL") or str(cfg["model"])
+    key_env = cfg["key_env"]
+    api_key = os.getenv(key_env) if key_env else None
+    if key_env and not api_key:
+        raise LLMError(f"{key_env} is not set (required for LLM_PROVIDER={provider}).")
+    max_tokens = int(os.getenv("LLM_MAX_TOKENS", "8192"))
+    timeout = float(os.getenv("LLM_TIMEOUT", "120"))
+    temp_env = os.getenv("LLM_TEMPERATURE")
+    temperature = float(temp_env) if temp_env not in (None, "") else None
+
+    if provider == "anthropic":
+        return AnthropicClient(api_key or "", model, max_tokens=max_tokens, timeout=timeout,
+                               temperature=temperature)
+    base_url = os.getenv("LLM_BASE_URL") or cfg["base_url"]
+    return OpenAICompatibleClient(provider, api_key, model, base_url, max_tokens=max_tokens,
+                                  timeout=timeout, temperature=temperature)
