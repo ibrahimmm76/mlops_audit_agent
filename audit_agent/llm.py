@@ -38,6 +38,9 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    # Opaque provider metadata that must be echoed back verbatim on the next request
+    # (e.g. Gemini 3 thought signatures in ``extra_content``).
+    provider_data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -118,6 +121,20 @@ def _retrying(fn, attempts: int = 6, base_delay: float = 2.0, max_timeouts: int 
             _notify(f"LLM provider busy/rate-limited ({status or type(exc).__name__}); retrying in {delay:.0f}s")
             time.sleep(delay)
     raise LLMError(f"LLM request failed: {redact_text(type(last).__name__ + ': ' + str(last))[:500]}")
+
+
+_GEMINI_SKIP_SIGNATURE = "skip_thought_signature_validator"
+
+
+def _extra_content(tool_call: Any) -> dict[str, Any]:
+    """Return ``{"extra_content": ...}`` if the provider attached it to a tool call."""
+    extra = getattr(tool_call, "extra_content", None)
+    if extra is None:
+        model_extra = getattr(tool_call, "model_extra", None) or {}
+        extra = model_extra.get("extra_content") if isinstance(model_extra, dict) else None
+    if extra is not None and hasattr(extra, "model_dump"):
+        extra = extra.model_dump()
+    return {"extra_content": extra} if isinstance(extra, dict) and extra else {}
 
 
 def _notify(msg: str) -> None:
@@ -224,7 +241,7 @@ class OpenAICompatibleClient:
                                      timeout=timeout, max_retries=0)
 
     @staticmethod
-    def _convert(system: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _convert(system: str, messages: list[dict[str, Any]], provider: str = "") -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = [{"role": "system", "content": system}]
         for m in messages:
             if m["role"] == "user":
@@ -232,11 +249,18 @@ class OpenAICompatibleClient:
             elif m["role"] == "assistant":
                 msg: dict[str, Any] = {"role": "assistant", "content": m.get("content") or ""}
                 if m.get("tool_calls"):
-                    msg["tool_calls"] = [
-                        {"id": tc["id"], "type": "function",
-                         "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])}}
-                        for tc in m["tool_calls"]
-                    ]
+                    msg["tool_calls"] = []
+                    for idx, tc in enumerate(m["tool_calls"]):
+                        call = {"id": tc["id"], "type": "function",
+                                "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])}}
+                        extra = (tc.get("provider_data") or {}).get("extra_content")
+                        if extra:
+                            call["extra_content"] = extra  # echo Gemini thought signature verbatim
+                        elif provider == "gemini" and idx == 0:
+                            # Gemini 3 requires a signature on the first call of each turn; this documented
+                            # placeholder is used only if the original signature is unavailable.
+                            call["extra_content"] = {"google": {"thought_signature": _GEMINI_SKIP_SIGNATURE}}
+                        msg["tool_calls"].append(call)
                 out.append(msg)
             elif m["role"] == "tool":
                 out.append({"role": "tool", "tool_call_id": m["tool_call_id"], "content": m["content"]})
@@ -245,7 +269,7 @@ class OpenAICompatibleClient:
     def complete(self, system, messages, tools):  # noqa: ANN001,ANN201
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "messages": self._convert(system, messages),
+            "messages": self._convert(system, messages, self.provider),
             "tools": [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                         "parameters": t["parameters"]}} for t in tools],
             "tool_choice": "auto",
@@ -278,7 +302,8 @@ class OpenAICompatibleClient:
                     args = {"__invalid_arguments__": raw[:500]}
             except json.JSONDecodeError:
                 args = {"__invalid_arguments__": raw[:500]}
-            calls.append(ToolCall(id=tc.id or f"call_{i}", name=tc.function.name, arguments=args))
+            calls.append(ToolCall(id=tc.id or f"call_{i}", name=tc.function.name, arguments=args,
+                                  provider_data=_extra_content(tc)))
         usage = {}
         if getattr(resp, "usage", None) is not None:
             usage = {"input_tokens": getattr(resp.usage, "prompt_tokens", 0) or 0,

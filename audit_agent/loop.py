@@ -95,7 +95,8 @@ class AuditAgent:
             self.messages.append({
                 "role": "assistant",
                 "content": resp.text or None,
-                "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls],
+                "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments,
+                                "provider_data": getattr(c, "provider_data", {}) or {}} for c in calls],
             })
             if resp.text:
                 self.tracer.event("llm_text", step=step, text=resp.text)

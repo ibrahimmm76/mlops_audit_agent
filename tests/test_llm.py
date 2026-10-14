@@ -169,6 +169,48 @@ class TimeoutAndEffortTests(unittest.TestCase):
         self.assertEqual(resp.tool_calls[0].name, "list_files")
 
 
+class ThoughtSignatureTests(unittest.TestCase):
+    """Gemini 3 rejects follow-up requests unless tool-call thought signatures are echoed back."""
+
+    def test_signature_captured_and_echoed(self):
+        sent = []
+        sig = {"google": {"thought_signature": "SIG-abc123"}}
+
+        class Completions:
+            def create(self, **kwargs):
+                sent.append(kwargs)
+                call = NS(id="t1", function=NS(name="list_files", arguments="{}"), extra_content=sig)
+                return NS(choices=[NS(message=NS(content="", tool_calls=[call]), finish_reason="tool_calls")],
+                          usage=None)
+
+        fake = types.SimpleNamespace(OpenAI=lambda **kw: NS(chat=NS(completions=Completions())))
+        with mock.patch.dict(sys.modules, {"openai": fake}):
+            client = llm_mod.OpenAICompatibleClient("gemini", "k", "m", None)
+            resp = client.complete("SYS", [{"role": "user", "content": "go"}], TOOLS)
+            tc = resp.tool_calls[0]
+            self.assertEqual(tc.provider_data, {"extra_content": sig})
+            history = [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": "",
+                 "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments,
+                                 "provider_data": tc.provider_data}]},
+                {"role": "tool", "tool_call_id": tc.id, "name": tc.name, "content": "a.py"},
+            ]
+            client.complete("SYS", history, TOOLS)
+        echoed = sent[1]["messages"][2]["tool_calls"][0]
+        self.assertEqual(echoed["extra_content"], sig)
+
+    def test_placeholder_only_for_gemini_first_call_without_signature(self):
+        msgs = [{"role": "assistant", "content": "", "tool_calls": [
+            {"id": "a", "name": "x", "arguments": {}}, {"id": "b", "name": "y", "arguments": {}}]}]
+        gem = llm_mod.OpenAICompatibleClient._convert("S", msgs, "gemini")[1]["tool_calls"]
+        self.assertEqual(gem[0]["extra_content"]["google"]["thought_signature"],
+                         "skip_thought_signature_validator")
+        self.assertNotIn("extra_content", gem[1])
+        groq = llm_mod.OpenAICompatibleClient._convert("S", msgs, "groq")[1]["tool_calls"]
+        self.assertNotIn("extra_content", groq[0])
+
+
 class FactoryTests(unittest.TestCase):
     def test_missing_configuration(self):
         env = {k: "" for k in ("LLM_PROVIDER", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
