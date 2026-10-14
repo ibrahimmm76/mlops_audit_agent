@@ -716,9 +716,43 @@ class RepoTools:
             out.append(f"({placeholders} placeholder-looking values ignored, e.g. 'changeme', '${{VAR}}', 'your-key')")
         if sensitive:
             out.append("Tracked files that typically hold secrets/local config: " + ", ".join(sensitive[:30]))
+        history = self._deleted_file_secrets()
+        if history:
+            out.append("SECRETS STILL IN GIT HISTORY (file deleted later, but the value remains in history; report "
+                       "with file=null since the file is no longer tracked):")
+            out.extend(f"  {h}" for h in history[:20])
         out.append("Tip: if a credential was removed in a later commit, check git_log(show_files=true) "
                    "and git_show_commit.")
         return _truncate("\n".join(out))
+
+    def _deleted_file_secrets(self) -> list[str]:
+        """Scan files that were deleted in history (still present in older commits)."""
+        try:
+            log = self._git("log", "--diff-filter=D", "--name-only", "--format=@%h", "-n", "200")
+        except ToolError:
+            return []
+        results: list[str] = []
+        sha = ""
+        for line in log.splitlines():
+            if line.startswith("@"):
+                sha = line[1:].strip()
+                continue
+            path = line.strip()
+            if not path or not sha:
+                continue
+            try:
+                content = self._git("show", f"{sha}^:{path}")
+            except ToolError:  # shallow clone boundary or binary
+                continue
+            for no, text_line in enumerate(content.splitlines(), start=1):
+                for h in find_secrets(text_line):
+                    if not h.placeholder:
+                        self.secret_values.add(h.value)
+                        results.append(f"{path}:{no} {h.kind} (deleted in commit {sha}; "
+                                       f"see git_show_commit('{sha}'))")
+            if len(results) > 40:
+                break
+        return results
 
     def run_ruff(self, path: str = "") -> str:
         """Static lint with ruff (parses code, never executes it)."""
@@ -770,8 +804,10 @@ class RepoTools:
         if not py_files:
             return "No Python files tracked."
         long_funcs, big_files, bare_except, syntax_errors = [], [], [], []
-        debug = []
+        debug, unresolved = [], []
         total_lines = 0
+        local_modules = _local_python_modules(py_files)
+        local_tops = {m.split(".")[0] for m in local_modules}
         for rel in py_files:
             text = self._read_text(rel)
             if text is None:
@@ -797,6 +833,13 @@ class RepoTools:
                 elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "breakpoint":
                     debug.append(f"{rel}:{node.lineno} breakpoint()")
                     self._observe(rel, [node.lineno])
+                elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                    names = ([node.module] if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module
+                             else [a.name for a in node.names] if isinstance(node, ast.Import) else [])
+                    for mod in names:
+                        if mod.split(".")[0] in local_tops and mod not in local_modules:
+                            unresolved.append(f"{rel}:{node.lineno} imports '{mod}' (no such module in the repo)")
+                            self._observe(rel, [node.lineno])
         out = [f"{len(py_files)} Python files, {total_lines} lines."]
         out.append("Syntax errors: " + (", ".join(syntax_errors[:20]) or "none"))
         out.append("Functions > 100 lines: " + (", ".join(x for _, x in sorted(long_funcs, reverse=True)[:10])
@@ -805,6 +848,8 @@ class RepoTools:
         out.append(f"Bare 'except:' clauses: {len(bare_except)}" + (f" ({', '.join(bare_except[:15])})"
                                                                     if bare_except else ""))
         out.append("Leftover breakpoint() calls: " + (", ".join(debug[:10]) or "none"))
+        out.append("Imports of the project's own modules that do not exist (code/tests cannot run): "
+                   + ("; ".join(unresolved[:15]) or "none"))
         return _truncate("\n".join(out))
 
     # ------------------------------------------------------------------ #
@@ -875,7 +920,8 @@ class RepoTools:
               "TLS verify disabled.",
               _obj({"path": _str("Optional file or directory to lint.")}), self.run_ruff),
             S("code_metrics",
-              "AST-based Python maintainability metrics: syntax errors, very long functions/files, bare except, "
+              "AST-based Python checks: syntax errors, imports of project modules that do not exist (e.g. a test "
+              "importing a missing module, so tests cannot pass), very long functions/files, bare except, "
               "leftover breakpoint() calls.",
               _obj({}), self.code_metrics),
         ]
@@ -1146,6 +1192,21 @@ def _is_other_ci(f: str) -> bool:
 # ---------------------------------------------------------------------- #
 # small helpers
 # ---------------------------------------------------------------------- #
+def _local_python_modules(py_files: list[str]) -> set[str]:
+    """Dotted names of every module/package defined by tracked .py files (src/ layout aware)."""
+    mods: set[str] = set()
+    for f in py_files:
+        parts = list(PurePosixPath(f).with_suffix("").parts)
+        for variant in (parts, parts[1:] if parts and parts[0] == "src" else None):
+            if not variant:
+                continue
+            if variant[-1] == "__init__":
+                variant = variant[:-1]
+            for i in range(1, len(variant) + 1):
+                mods.add(".".join(variant[:i]))
+    return mods
+
+
 def _is_test_path(rel: str) -> bool:
     return bool(re.search(r"(^|/)(tests?|__tests__|spec|fixtures?|testdata)/|(^|/)test_[^/]*$|_test\.[a-z]+$|"
                           r"\.(test|spec)\.[jt]sx?$|(^|/)conftest\.py$", rel))

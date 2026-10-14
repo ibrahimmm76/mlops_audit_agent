@@ -63,6 +63,7 @@ class AuditAgent:
         self._review_done = False
         self._finished = False
         self._time_warned = False
+        self._tools_gate_done = False
         self._coverage: dict[str, str] = {}
         self._summary = ""
         self.tool_calls = 0
@@ -247,6 +248,13 @@ class AuditAgent:
                 return prompts.COVERAGE_GATE.format(missing=", ".join(missing))
             self._coverage_ok = True
 
+        if not self._tools_gate_done:
+            self._tools_gate_done = True
+            unused = self._unused_analysis_tools()
+            if unused:
+                self.tracer.event("gate", message=f"analysis-tool gate: not yet used {unused}")
+                return prompts.TOOLS_GATE.format(tools="\n".join(f"- {t}: {why}" for t, why in unused))
+
         if not self._review_done:
             self._review_done = True
             self.tracer.event("gate", message=f"self-review gate over {len(self.store)} finding(s)")
@@ -255,6 +263,20 @@ class AuditAgent:
         self._finished = True
         self.tracer.event("gate", message="finish accepted")
         return f"Audit finished with {len(self.store)} finding(s)."
+
+    def _unused_analysis_tools(self) -> list[tuple[str, str]]:
+        """Specialised analysis tools the agent has not run yet (it still decides whether to)."""
+        used = set(self.tools_used)
+        has_py = any(f.endswith(".py") for f in self.tools.tracked_files())
+        candidates = [
+            ("scan_secrets", "credentials in files AND in git history (deleted files)", True),
+            ("inspect_workflows", "CI triggers, gates, permissions, deploy jobs", True),
+            ("check_dependencies", "pinning, conflicting specs, lockfiles", True),
+            ("run_ruff", "TLS verify disabled, hardcoded passwords, bare except, undefined names", has_py),
+            ("code_metrics", "syntax errors, imports of missing project modules (broken tests), bare except",
+             has_py),
+        ]
+        return [(name, why) for name, why, relevant in candidates if relevant and name not in used]
 
     # ---------------- context management ---------------- #
     def _compact_history(self) -> None:

@@ -171,10 +171,11 @@ tests/                  Offline unit tests (scripted fake LLM, throwaway git rep
   applications for lockfiles, and "never infer branch protection from files".
 * Tool heuristics are presented as *flags to confirm*, not verdicts.
 * The self-review gate makes the model re-justify every finding and withdraw unsupported ones.
+* "Something is missing" findings (no tests, no linting, no CI, no README) are always reported repository-level (`file`/`line` null).
 
 **Recall safeguards:** a rule catalogue covering all nine inspection areas, purpose-built tools for the
 subtle defect classes (workflow security, dependency drift, secrets in history), and a coverage gate that
-refuses `finish` until every category has been examined or explicitly ruled out.
+refuses `finish` until every category has been examined or explicitly ruled out. A second gate points out any specialised analysis tools (secret/history scan, workflow, dependency, ruff and AST checks) not yet run. The model still decides whether to run them.
 
 **Reliability:** step and time budgets with warnings to the model, history compaction for long audits,
 exponential-backoff retries for rate limits and 5xx errors, fast failure for authentication errors, and a
@@ -193,9 +194,9 @@ clean non-zero exit with a useful message on fatal errors.
 | `inspect_workflows()` | | Parses GitHub Actions YAML with line numbers: triggers vs default branch, permissions, `pull_request_target` + PR checkout, script injection, `continue-on-error` / `\|\| true`, secrets echoed, mutable action refs, deploy jobs without a test gate, auto-merge |
 | `check_dependencies()` | | requirements/pyproject/setup.py/Pipfile/package.json/go.mod/Cargo: constraint strength, conflicting specs across files, missing or out-of-sync lockfiles, insecure indexes |
 | `detect_project_tooling()` | | Linters/formatters, test files and config, CI systems, packaging, docs and collaboration files, used to recognise **acceptable alternatives** |
-| `scan_secrets(path_glob)` | | Credential detection by type and location; values are never revealed; placeholders and test fixtures are distinguished |
+| `scan_secrets(path_glob)` | | Credential detection by type and location, including files **deleted earlier whose secrets remain in git history**; values are never revealed; placeholders and test fixtures are distinguished |
 | `run_ruff(path)` | | Static ruff lint with a curated rule set (syntax errors, undefined names, bare except, hardcoded passwords, `verify=False`...) |
-| `code_metrics()` | | AST metrics: syntax errors, giant functions/files, bare `except:`, leftover `breakpoint()` |
+| `code_metrics()` | | AST checks: syntax errors, **imports of project modules that don't exist** (tests that can never pass), giant functions/files, bare `except:`, leftover `breakpoint()` |
 
 Control tools exposed to the LLM: `record_violation`, `withdraw_violation`, `finish`.
 

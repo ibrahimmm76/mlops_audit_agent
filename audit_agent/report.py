@@ -56,6 +56,9 @@ CATEGORY_ALIASES = {
     "release": "build_release",
 }
 
+# Rules that describe something MISSING from the repository (reported with file/line null).
+ABSENCE_RULES = frozenset({"HYG-001", "DEP-001", "CQ-001", "TST-001", "CI-001"})
+
 RULE_ID_RE = re.compile(r"^[A-Z]{2,4}-\d{3}$")
 REQUIRED_FIELDS = (
     "rule_id", "category", "severity", "file", "line", "description", "evidence", "recommendation",
@@ -162,6 +165,10 @@ def build_finding(
         total = line_count(file_val)
         if total is not None and line_val > total:
             raise FindingError(f"line {line_val} is beyond the end of {file_val} ({total} lines)")
+
+    if rule_id in ABSENCE_RULES:
+        # "X is missing" is a repository-level finding: no single file/line shows an absence.
+        file_val, line_val = None, None
 
     finding = Finding(
         rule_id=rule_id,

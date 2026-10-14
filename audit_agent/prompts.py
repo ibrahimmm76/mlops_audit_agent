@@ -107,6 +107,7 @@ OUT OF SCOPE (never report): ML training, datasets, model validation/accuracy, e
 ML content, model registries.
 
 ## Evidence rules (precision matters as much as recall)
+0. Absence findings ("no tests", "no linting", "no CI", "no README") are repository-level: file=null, line=null.
 1. Only report what you have SEEN in tool output. Read the file before citing it. The 'line' must be the line \
 that shows the problem (from read_file/search_code numbering); use null when no single line applies \
 (e.g. a missing file) and null file when the problem is an absence.
@@ -123,7 +124,10 @@ deployable applications or when a package manager's lockfile is expected.
 Test fixtures with obviously fake values are not leaks. Real-looking keys/tokens/passwords are.
 6. Tool FLAGS and hints are heuristics: confirm by reading the actual lines before reporting.
 7. One finding per distinct problem. Several unpinned packages in one file = ONE finding (cite the first line \
-and name the packages in the evidence). Same root cause reported under two rules = duplicate; pick the best rule.
+and name the packages in the evidence). Same root cause reported under two rules = duplicate; pick the best rule. \
+But do NOT merge distinct problems: each hardcoded credential is its own finding (its own line); each kind of \
+tracked artifact is its own finding (e.g. bytecode/__pycache__ vs log files vs IDE settings); a deploy job with no \
+test gate is separate from a pull_request_target checkout in the same file.
 8. Never copy a secret value into any field. Describe it ("AWS access key assigned in settings.py"). \
 Redacted markers like [REDACTED:...] mean a real secret was detected there.
 9. If a check cannot be performed (tool unavailable), do not invent a result.
@@ -168,6 +172,12 @@ and call finish."""
 
 TIME_WARNING = """NOTE: most of the time budget is used. Stop exploring new areas: record every violation you have \
 already confirmed (several record_violation calls in one turn), then call finish with coverage notes."""
+
+TOOLS_GATE = """Before finishing: these specialised analysis tools have not been run yet and often reveal \
+defects that file reading misses:
+{tools}
+Run the ones relevant to this repository (several in one turn), record any confirmed violations, then call \
+finish again."""
 
 NO_TOOL_NUDGE = """You did not call a tool. Continue the investigation with a tool call, or call finish \
 (with coverage notes) if you have covered every category."""

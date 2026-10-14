@@ -34,7 +34,9 @@ def happy_script():
         [("read_file", {"path": "config.py"}), ("scan_secrets", {})],
         [("record_violation", SECRET_FINDING), ("record_violation", README_FINDING)],
         [("finish", {"coverage": {"security": "scanned"}})],          # coverage gate rejects
-        [("finish", {"coverage": FULL_COVERAGE})],                    # passes coverage, review gate
+        [("finish", {"coverage": FULL_COVERAGE})],                    # analysis-tool gate (unused tools)
+        [("inspect_workflows", {}), ("code_metrics", {})],            # LLM follows the hint
+        [("finish", {"coverage": FULL_COVERAGE})],                    # self-review gate
         [("finish", {"coverage": FULL_COVERAGE, "summary": "done"})],  # accepted
     ]
 
@@ -59,6 +61,7 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(called[:3], ["list_files", "read_file", "scan_secrets"])
         gates = [e["message"] for e in tracer.events if e["event"] == "gate"]
         self.assertTrue(any("coverage gate" in g for g in gates))
+        self.assertTrue(any("analysis-tool gate" in g and "run_ruff" in g for g in gates))
         self.assertTrue(any("self-review gate" in g for g in gates))
         # every tool result was fed back to the LLM for interpretation
         last_msgs = llm.requests[-1]["messages"]
@@ -75,6 +78,7 @@ class AgentLoopTests(unittest.TestCase):
             [("record_violation", {**SECRET_FINDING, "file": "nope.py"})],  # nonexistent file
             [("finish", {"coverage": FULL_COVERAGE})],
             [("finish", {"coverage": FULL_COVERAGE})],
+            [("finish", {"coverage": FULL_COVERAGE})],
         ])
         tracer = Tracer()
         result = AuditAgent(llm, self.tools, tracer, max_steps=10).run()
@@ -87,6 +91,7 @@ class AgentLoopTests(unittest.TestCase):
         llm = ScriptedLLM([
             [("read_file", {"path": "config.py"}), ("record_violation", SECRET_FINDING)],
             [("finish", {"coverage": FULL_COVERAGE})],
+            [("finish", {"coverage": FULL_COVERAGE})],
             [("withdraw_violation", {"finding_id": "F1", "reason": "test fixture"})],
             [("finish", {"coverage": FULL_COVERAGE})],
         ])
@@ -98,6 +103,7 @@ class AgentLoopTests(unittest.TestCase):
         llm = ScriptedLLM([
             [("delete_everything", {}), ("read_file", {}), ("read_file", {"path": "../../etc/passwd"})],
             [("search_code", {"pattern": "(["})],
+            [("finish", {"coverage": FULL_COVERAGE})],
             [("finish", {"coverage": FULL_COVERAGE})],
             [("finish", {"coverage": FULL_COVERAGE})],
         ])
@@ -131,6 +137,35 @@ class AgentLoopTests(unittest.TestCase):
 
         with self.assertRaises(LLMError):
             AuditAgent(Boom(), self.tools, Tracer(), max_steps=5).run()
+
+
+class GateTests(unittest.TestCase):
+    def test_tool_gate_skipped_when_tools_already_used(self):
+        root = make_repo({"README.md": "# x\n"})  # no Python -> ruff/code_metrics not relevant
+        try:
+            llm = ScriptedLLM([
+                [("scan_secrets", {}), ("inspect_workflows", {}), ("check_dependencies", {})],
+                [("finish", {"coverage": FULL_COVERAGE})],   # straight to self-review
+                [("finish", {"coverage": FULL_COVERAGE})],   # accepted
+            ])
+            tracer = Tracer()
+            result = AuditAgent(llm, RepoTools(root), tracer, max_steps=10).run()
+            self.assertTrue(result.finished)
+            self.assertFalse(any("analysis-tool gate" in e.get("message", "") for e in tracer.events))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_absence_findings_are_repository_level(self):
+        root = make_repo({"pyproject.toml": "[project]\nname='x'\n"})
+        try:
+            finding = {"rule_id": "CQ-001", "category": "code_quality", "severity": "medium",
+                       "file": "pyproject.toml", "line": 1, "description": "No linting configured",
+                       "evidence": "no lint config", "recommendation": "Add ruff"}
+            llm = ScriptedLLM([[("read_file", {"path": "pyproject.toml"}), ("record_violation", finding)]])
+            result = AuditAgent(llm, RepoTools(root), Tracer(), max_steps=5).run()
+            self.assertEqual((result.findings[0].file, result.findings[0].line), (None, None))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 class CLITests(unittest.TestCase):
@@ -168,7 +203,7 @@ class CLITests(unittest.TestCase):
     def test_empty_violations_when_none_found(self):
         out = self.out_dir / "r.json"
         llm = ScriptedLLM([[("list_files", {})], [("finish", {"coverage": FULL_COVERAGE})],
-                           [("finish", {"coverage": FULL_COVERAGE})]])
+                           [("finish", {"coverage": FULL_COVERAGE})], [("finish", {"coverage": FULL_COVERAGE})]])
         code, _ = self._run(["--repo", "https://github.com/a/b", "--output", str(out), "--trace", "none"], llm=llm)
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out.read_text()), {"repository": "https://github.com/a/b", "violations": []})

@@ -227,6 +227,28 @@ class ToolTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_code_metrics_flags_missing_local_module(self):
+        root = make_repo({"app/__init__.py": "", "app/core.py": "X = 1\n",
+                          "tests/test_x.py": "from app.core import X\nfrom app.ghost import Y\nimport os\n"})
+        try:
+            out = RepoTools(root).code_metrics()
+            self.assertIn("tests/test_x.py:2 imports 'app.ghost'", out)
+            self.assertNotIn("app.core'", out)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_scan_secrets_finds_secret_in_deleted_file(self):
+        secret = "Sup3r" + "Secret!Pass"
+        root = make_repo({"creds.json": '{"db_password": "' + secret + '"}\n', "a.py": "x = 1\n"},
+                         extra_commits=[{"delete": ["creds.json"], "message": "remove creds"}])
+        try:
+            out = RepoTools(root).scan_secrets()
+            self.assertIn("SECRETS STILL IN GIT HISTORY", out)
+            self.assertIn("creds.json:1", out)
+            self.assertNotIn(secret, out)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_specs_have_schemas(self):
         names = {s.name for s in self.bad.specs()}
         self.assertTrue({"list_files", "read_file", "search_code", "git_log"} <= names)
