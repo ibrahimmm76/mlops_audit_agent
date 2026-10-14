@@ -39,7 +39,8 @@ RULE_CATALOG: dict[str, list[tuple[str, str]]] = {
         ("CI-001", "No CI pipeline at all for a project with code to validate"),
         ("CI-002", "Incorrect triggers (branch filter excludes default branch, wrong event, only manual)"),
         ("CI-003", "Ineffective quality gate (continue-on-error, '|| true', lint with --exit-zero, if: false)"),
-        ("CI-004", "Validation skipped or disabled (steps commented out/disabled, paths filter excluding code)"),
+        ("CI-004", "Validation skipped or disabled (invalid workflow YAML that GitHub cannot load, steps "
+                   "commented out/disabled, paths filter excluding code)"),
         ("CI-005", "Action referenced by mutable branch (@main/@master) or without version"),
     ],
     "security": [

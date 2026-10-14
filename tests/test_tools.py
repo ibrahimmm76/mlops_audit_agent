@@ -156,6 +156,20 @@ class ToolTests(unittest.TestCase):
         self.assertIn("FLAGS: none", out)
         self.assertIn("test-running jobs: ['test']", out)
 
+    def test_inspect_workflows_invalid_yaml_falls_back_to_line_scan(self):
+        broken = ("on: push\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n"
+                  "      - run: echo \"PR: ${{ github.event.pull_request.title }}\"\n"
+                  "      - run: pytest || true\n")
+        root = make_repo({".github/workflows/ci.yml": broken})
+        try:
+            out = RepoTools(root).inspect_workflows()
+            self.assertIn("INVALID YAML (line 6)", out)
+            self.assertIn("NONE of its jobs run", out)
+            self.assertIn("line 7: masks failures", out)
+            self.assertIn("line 6: untrusted github.event data", out)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_inspect_workflows_none(self):
         root = make_repo({"a.py": "x = 1\n", ".gitlab-ci.yml": "test:\n  script: pytest\n"})
         try:

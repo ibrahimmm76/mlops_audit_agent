@@ -1,0 +1,32 @@
+{
+  "repository": "https://github.com/ibrahimmm76/devops_tests",
+  "notes": "Defects deliberately injected into the devops_tests fixture. Each expected item lists acceptable rule ids/categories, the file (null = repository-level) and the line (null = any line). Healthy parts that must NOT be reported: README.md present, LICENSE present, tests exist, CI exists, pyproject pins its own deps.",
+  "expected": [
+    {"id": "E01", "summary": "Hardcoded AWS access key id", "rule_ids": ["SEC-001"], "categories": ["security"], "file": "app/config.py", "line": 8},
+    {"id": "E02", "summary": "Hardcoded database password", "rule_ids": ["SEC-001"], "categories": ["security"], "file": "app/config.py", "line": 15},
+    {"id": "E03", "summary": ".env with production credentials committed", "rule_ids": ["SEC-002", "SEC-001", "HYG-003"], "categories": ["security", "repository_hygiene", "configuration"], "file": ".env", "line": null},
+    {"id": "E04", "summary": "Credentials file committed then deleted - secret still in git history", "rule_ids": ["SEC-001", "SEC-002"], "categories": ["security"], "file": null, "line": null},
+    {"id": "E05", "summary": "TLS verification disabled (verify=False)", "rule_ids": ["SEC-007"], "categories": ["security", "code_quality"], "file": "app/storage.py", "line": 27},
+    {"id": "E06", "summary": "Debug mode enabled for production", "rule_ids": ["SEC-007", "CFG-003"], "categories": ["security", "configuration"], "file": ["app/config.py", "app/main.py"], "line": null},
+    {"id": "E07", "summary": "Workflow token permissions: write-all", "rule_ids": ["SEC-003"], "categories": ["security", "ci"], "file": ".github/workflows/ci.yml", "line": 8},
+    {"id": "E08", "summary": "Script injection via PR title in run step", "rule_ids": ["SEC-005"], "categories": ["security", "ci"], "file": ".github/workflows/ci.yml", "line": 26},
+    {"id": "E09", "summary": "pull_request_target checks out and runs untrusted PR code with secrets", "rule_ids": ["SEC-004"], "categories": ["security", "ci"], "file": ".github/workflows/deploy.yml", "line": 21},
+    {"id": "E10", "summary": "Registry token echoed to CI logs", "rule_ids": ["SEC-006"], "categories": ["security", "ci"], "file": ".github/workflows/deploy.yml", "line": 25},
+    {"id": "E11", "summary": "CI push trigger filters on 'master' but default branch is 'main'", "rule_ids": ["CI-002"], "categories": ["ci"], "file": ".github/workflows/ci.yml", "line": 5},
+    {"id": "E12", "summary": "Test failures masked with '|| true'", "rule_ids": ["TST-004", "CI-003"], "categories": ["testing", "ci"], "file": ".github/workflows/ci.yml", "line": 29},
+    {"id": "E13", "summary": "Third-party action pinned to mutable @master", "rule_ids": ["CI-005"], "categories": ["ci", "security"], "file": ".github/workflows/ci.yml", "line": 32},
+    {"id": "E14", "summary": "Deploy job runs on every push/PR with no dependency on tests", "rule_ids": ["BLD-002"], "categories": ["build_release", "ci"], "file": ".github/workflows/deploy.yml", "line": null},
+    {"id": "E15", "summary": "Dockerfile: unpinned python:latest base, runs as root, COPY . . without .dockerignore", "rule_ids": ["BLD-003"], "categories": ["build_release", "security"], "file": "Dockerfile", "line": null},
+    {"id": "E16", "summary": "Deploy script pipes a remote script into bash", "rule_ids": ["SEC-007", "BLD-002"], "categories": ["security", "build_release"], "file": "scripts/deploy.sh", "line": 5},
+    {"id": "E17", "summary": "Python bytecode (__pycache__) tracked", "rule_ids": ["HYG-003"], "categories": ["repository_hygiene"], "file": "app/__pycache__/storage.cpython-312.pyc", "line": null},
+    {"id": "E18", "summary": "Log file tracked", "rule_ids": ["HYG-003"], "categories": ["repository_hygiene"], "file": "logs/app.log", "line": null},
+    {"id": "E19", "summary": ".gitignore unsuitable for a Python project (no .env, __pycache__, logs, venv)", "rule_ids": ["HYG-002"], "categories": ["repository_hygiene"], "file": [".gitignore", null], "line": null},
+    {"id": "E20", "summary": "Machine-specific Windows path for uploads", "rule_ids": ["CFG-001"], "categories": ["configuration"], "file": "app/config.py", "line": 19},
+    {"id": "E21", "summary": "Committed IDE settings with a local interpreter path", "rule_ids": ["CFG-002", "CFG-001", "HYG-003"], "categories": ["configuration", "repository_hygiene"], "file": ".vscode/settings.json", "line": null},
+    {"id": "E22", "summary": "requests specified inconsistently (>=2.31 vs ==2.25.1)", "rule_ids": ["DEP-003"], "categories": ["dependency_management"], "file": ["requirements.txt", "pyproject.toml"], "line": null},
+    {"id": "E23", "summary": "Unpinned runtime dependencies in requirements.txt for a deployed application", "rule_ids": ["DEP-002"], "categories": ["dependency_management"], "file": "requirements.txt", "line": null},
+    {"id": "E24", "summary": "Test module imports a module that does not exist (tests cannot pass)", "rule_ids": ["TST-003"], "categories": ["testing"], "file": "tests/test_storage.py", "line": 3},
+    {"id": "E25", "summary": "No linting/formatting configured anywhere", "rule_ids": ["CQ-001"], "categories": ["code_quality"], "file": null, "line": null},
+    {"id": "E26", "summary": "Bare except silently swallows errors", "rule_ids": ["CQ-003"], "categories": ["code_quality"], "file": "app/storage.py", "line": 30}
+  ]
+}

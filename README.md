@@ -242,7 +242,25 @@ with injected defects exercise every tool. They cover:
 
 CI (`.github/workflows/ci.yml`) runs ruff, pytest and a CLI smoke test on Python 3.11 to 3.13.
 
-## 6. Inspecting the agent's behaviour
+## 6. Self-evaluation (precision / recall)
+
+[`ibrahimmm76/devops_tests`](https://github.com/ibrahimmm76/devops_tests) is a small Flask service with
+26 deliberately injected defects across all nine categories. They range from obvious (hardcoded
+credentials, tracked `.env`) to subtle (a secret deleted but still in git history, a CI branch filter that
+never matches `main`, `pull_request_target` running PR code). It also has healthy parts that must *not*
+be reported. The answer key is in [`evaluation/devops_tests_answer_key.json`](evaluation/devops_tests_answer_key.json).
+
+```bash
+python agent.py --repo https://github.com/ibrahimmm76/devops_tests --output sample_report.json -v
+python evaluation/score.py sample_report.json evaluation/devops_tests_answer_key.json
+```
+
+The scorer uses the assignment's definitions. Precision = matched / reported and recall = matched /
+expected. A match needs an accepted rule id, the same file, and a line within ±3; duplicates earn nothing.
+It lists matched items, unmatched reports and missed defects, so you can see exactly where the agent
+gained or lost points.
+
+## 7. Inspecting the agent's behaviour
 
 Every run writes `<output>.trace.jsonl`. Each line is one event: the LLM's reasoning text, each tool call
 with arguments, duration and (redacted) output, findings recorded, rejected or withdrawn, and gate
@@ -252,7 +270,7 @@ decisions. Use `-v` to watch it live:
 python agent.py --repo https://github.com/<owner>/<repo> --output report.json -v
 ```
 
-## 7. Limitations
+## 8. Limitations
 
 * Static analysis only: failing tests are detected when visibly broken or masked, not by running them.
 * Shallow clone (latest 200 commits): very old history is not searched.

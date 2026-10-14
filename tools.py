@@ -905,17 +905,37 @@ _TEST_CMD = re.compile(r"\b(pytest|py\.test|unittest|tox|nox|npm (run )?test|yar
                        r"cargo test|mvn (-\S+ )*test|gradle(w)? test|make test|jest|vitest|phpunit|rspec)\b")
 _MASKING = re.compile(r"(\|\|\s*(true|exit 0|:)\b|;\s*exit 0\s*$|set \+e|--exit-zero|-\s*-exit-zero)", re.M)
 _MUTABLE_REFS = {"main", "master", "latest", "dev", "develop", "head", "trunk"}
+_P_IF = r"\bif\s*:"
+_P_REF = r"\bref\s*:"
+_P_ECHO_SECRET = r"(echo|printf|cat)\b.*secrets\."  # noqa: S105 - regex, not a password
 
 
 def _summarise_workflow(rel: str, text: str, default_branch: str) -> tuple[str, bool]:
     try:
         data = yaml.load(text, Loader=_LineLoader)  # noqa: S506 - SafeLoader subclass
     except yaml.YAMLError as exc:
-        return f"\n== {rel}: INVALID YAML: {str(exc)[:300]}", False
+        mark = getattr(exc, "problem_mark", None)
+        where = f" (line {mark.line + 1})" if mark is not None else ""
+        flags, has_tests = _scan_workflow_lines(text)
+        out = [f"\n== {rel}: INVALID YAML{where}: {' '.join(str(exc).split())[:250]}",
+               "  ! GitHub Actions cannot load this workflow, so NONE of its jobs run "
+               "(CI silently disabled).",
+               "Line-based fallback scan (the file could not be parsed):"]
+        out += [f"  ! {f}" for f in flags] or ["  (no risky patterns found by line scan)"]
+        return "\n".join(out), has_tests
     if not isinstance(data, dict):
         return f"\n== {rel}: not a mapping", False
     lines = [f"\n== {rel}  (name: {data.get('name', '-')})"]
     flags: list[str] = []
+    src = text.splitlines()
+
+    def find(start: int | None, pattern: str, default: int | None = None) -> int | None:
+        """First line >= start matching pattern: points findings at the exact offending line."""
+        rx = re.compile(pattern)
+        for no in range(max(1, start or 1), len(src) + 1):
+            if not src[no - 1].lstrip().startswith("#") and rx.search(src[no - 1]):
+                return no
+        return default if default is not None else start
     triggers = data.get("on", data.get(True))  # PyYAML parses bare 'on' as True
     trig_names: list[str] = []
     if isinstance(triggers, str):
@@ -932,10 +952,11 @@ def _summarise_workflow(rel: str, text: str, default_branch: str) -> tuple[str, 
                 br = cfg.get("branches")
                 if br is not None:
                     br_list = br if isinstance(br, list) else [br]
-                    lines.append(f"  {ev}.branches: {br_list} (line {cfg.get('__line__')})")
+                    bl = find(cfg.get("__line__"), r"\bbranches\s*:")
+                    lines.append(f"  {ev}.branches: {br_list} (line {bl})")
                     if default_branch not in br_list and not any(any(c in str(b) for c in "*?[") for b in br_list):
                         flags.append(f"{ev} branch filter {br_list} does not include the default branch "
-                                     f"'{default_branch}' (line {cfg.get('__line__')}) -> workflow may never run "
+                                     f"'{default_branch}' (line {bl}) -> workflow may never run "
                                      "for the main line of development")
                 for key in ("paths", "paths-ignore", "branches-ignore", "tags"):
                     if cfg.get(key) is not None:
@@ -968,18 +989,19 @@ def _summarise_workflow(rel: str, text: str, default_branch: str) -> tuple[str, 
     for job_id, job in jobs.items():
         if job_id == "__line__" or not isinstance(job, dict):
             continue
-        jl = job.get("__line__")
+        jl = find(1, rf"^\s*{re.escape(str(job_id))}\s*:", job.get("__line__"))
         needs = job.get("needs")
         needs_l = needs if isinstance(needs, list) else ([needs] if needs else [])
         lines.append(f"job '{job_id}' (line {jl}): runs-on={job.get('runs-on')}, needs={needs_l or '-'}, "
                      f"if={job.get('if', '-')}, permissions={_fmt_perm(job.get('permissions'))}"
                      + (f", uses reusable workflow {job.get('uses')}" if job.get("uses") else ""))
         if job.get("permissions") == "write-all":
-            flags.append(f"job '{job_id}' permissions: write-all (line {jl})")
+            flags.append(f"job '{job_id}' permissions: write-all (line {find(jl, 'write-all', jl)})")
         if job.get("continue-on-error") in (True, "true"):
-            flags.append(f"job '{job_id}' has continue-on-error: true (line {jl}) - failures never fail the run")
+            flags.append(f"job '{job_id}' has continue-on-error: true (line {find(jl, 'continue-on-error', jl)}) "
+                         "- failures never fail the run")
         if str(job.get("if", "")).strip() in ("false", "${{ false }}", "0"):
-            flags.append(f"job '{job_id}' is disabled with if: false (line {jl})")
+            flags.append(f"job '{job_id}' is disabled with if: false (line {find(jl, _P_IF, jl)})")
         if job.get("environment"):
             lines.append(f"  environment: {job.get('environment')}")
         steps = job.get("steps") or []
@@ -999,9 +1021,10 @@ def _summarise_workflow(rel: str, text: str, default_branch: str) -> tuple[str, 
                 owner = str(uses).split("/", 1)[0]
                 if not str(uses).startswith(("./", "docker://")):
                     if not ref:
-                        flags.append(f"action '{uses}' has no version ref (line {sl})")
+                        flags.append(f"action '{uses}' has no version ref (line {find(sl, re.escape(str(uses)), sl)})")
                     elif ref.lower() in _MUTABLE_REFS:
-                        flags.append(f"action '{uses}' pinned to mutable branch '{ref}' (line {sl})")
+                        flags.append(f"action '{uses}' pinned to mutable branch '{ref}' "
+                                     f"(line {find(sl, re.escape(str(uses)), sl)})")
                     elif owner not in ("actions", "github") and not re.fullmatch(r"[0-9a-f]{40}", ref):
                         lines.append(f"    (third-party action pinned to tag '{ref}', not a commit SHA)")
                 if "checkout" in str(uses):
@@ -1011,7 +1034,7 @@ def _summarise_workflow(rel: str, text: str, default_branch: str) -> tuple[str, 
                         if "pull_request_target" in trig_names or "workflow_run" in trig_names:
                             event = "pull_request_target" if "pull_request_target" in trig_names else "workflow_run"
                             flags.append(f"checks out untrusted PR head ({ref_in}) in a privileged {event} "
-                                         f"workflow (line {sl}) - critical 'pwn request' risk")
+                                         f"workflow (line {find(sl, _P_REF, sl)}) - critical 'pwn request' risk")
                 if re.search(r"deploy|release|publish|pypi|docker/build-push|aws-actions|azure/|"
                              r"google-github-actions|heroku|vercel|netlify|gh-pages", str(uses), re.I):
                     is_deploy = True
@@ -1022,30 +1045,35 @@ def _summarise_workflow(rel: str, text: str, default_branch: str) -> tuple[str, 
                     job_runs_tests = True
                 m = _MASKING.search(run)
                 if m:
-                    flags.append(f"step '{name}' masks failures with '{m.group(0).strip()}' (line {sl})")
+                    flags.append(f"step '{name}' masks failures with '{m.group(0).strip()}' "
+                                 f"(line {find(sl, re.escape(m.group(0).strip()), sl)})")
                 if _UNTRUSTED_CTX.search(run):
                     flags.append(f"step '{name}' interpolates untrusted github.event data directly into a shell "
-                                 f"script (line {sl}) - script injection")
+                                 f"script (line {find(sl, _UNTRUSTED_CTX.pattern, sl)}) - script injection")
                 if re.search(r"(echo|printf|cat)\b[^\n]*\$\{\{\s*secrets\.", run):
-                    flags.append(f"step '{name}' echoes a secret into the log (line {sl})")
+                    flags.append(f"step '{name}' echoes a secret into the log "
+                                 f"(line {find(sl, _P_ECHO_SECRET, sl)})")
                 if re.search(r"\b(curl|wget)\b[^\n|]*\|\s*(sudo\s+)?(ba)?sh\b", run):
-                    flags.append(f"step '{name}' pipes a downloaded script to a shell (line {sl})")
+                    flags.append(f"step '{name}' pipes a downloaded script to a shell "
+                                 f"(line {find(sl, '(curl|wget)', sl)})")
                 if re.search(r"(deploy|publish|twine upload|docker push|kubectl apply|helm (upgrade|install)|"
                              r"terraform apply|npm publish|gh release|git push)", run, re.I):
                     is_deploy = True
                 if re.search(r"git push\s+(-f|--force)", run):
-                    flags.append(f"step '{name}' force-pushes (line {sl})")
+                    flags.append(f"step '{name}' force-pushes (line {find(sl, r'git push', sl)})")
                 if re.search(r"gh pr (merge|review)[^\n]*(--auto|--approve|--admin)", run):
-                    flags.append(f"step '{name}' auto-merges/approves pull requests (line {sl}) - check gating")
+                    flags.append(f"step '{name}' auto-merges/approves pull requests (line {find(sl, r'gh pr', sl)}) "
+                                 "- check gating")
             if step.get("continue-on-error") in (True, "true"):
-                flags.append(f"step '{name}' has continue-on-error: true (line {sl})")
+                flags.append(f"step '{name}' has continue-on-error: true (line {find(sl, 'continue-on-error', sl)})")
             if str(step.get("if", "")).strip() in ("false", "${{ false }}", "0"):
-                flags.append(f"step '{name}' is disabled with if: false (line {sl})")
+                flags.append(f"step '{name}' is disabled with if: false (line {find(sl, _P_IF, sl)})")
             if step.get("env"):
                 for k, v in step["env"].items():
                     if k != "__line__" and isinstance(v, str) and find_secrets(f'{k}="{v}"') \
                             and "${{" not in v:
-                        flags.append(f"step '{name}' sets env {k} to a literal credential (line {sl})")
+                        flags.append(f"step '{name}' sets env {k} to a literal credential "
+                                     f"(line {find(sl, re.escape(str(k)), sl)})")
             lines.append(desc)
         if job_runs_tests:
             has_tests = True
@@ -1072,6 +1100,35 @@ def _summarise_workflow(rel: str, text: str, default_branch: str) -> tuple[str, 
         lines.append("FLAGS: none")
     lines.append(f"test-running jobs: {sorted(test_jobs) or 'none'}")
     return "\n".join(lines), has_tests
+
+
+def _scan_workflow_lines(text: str) -> tuple[list[str], bool]:
+    """Regex fallback for workflows that are not valid YAML."""
+    flags: list[str] = []
+    has_tests = False
+    for no, line in enumerate(text.splitlines(), start=1):
+        s = line.strip()
+        if s.startswith("#"):
+            continue
+        if _TEST_CMD.search(s):
+            has_tests = True
+        m = _MASKING.search(s)
+        if m:
+            flags.append(f"line {no}: masks failures with '{m.group(0).strip()}'")
+        if _UNTRUSTED_CTX.search(s):
+            flags.append(f"line {no}: untrusted github.event data interpolated (possible script injection)")
+        if re.search(r"(echo|printf)\b.*\$\{\{\s*secrets\.", s):
+            flags.append(f"line {no}: echoes a secret into the log")
+        if re.search(r"continue-on-error:\s*true", s):
+            flags.append(f"line {no}: continue-on-error: true")
+        if re.search(r"permissions:\s*write-all", s):
+            flags.append(f"line {no}: permissions: write-all")
+        if "pull_request_target" in s:
+            flags.append(f"line {no}: pull_request_target trigger")
+        um = re.search(r"uses:\s*([^\s@#]+)@([^\s#]+)", s)
+        if um and um.group(2).lower() in _MUTABLE_REFS:
+            flags.append(f"line {no}: action {um.group(1)} pinned to mutable ref '{um.group(2)}'")
+    return flags, has_tests
 
 
 def _fmt_perm(perm: Any) -> str:
