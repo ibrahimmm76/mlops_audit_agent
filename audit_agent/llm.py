@@ -88,7 +88,9 @@ _TRANSIENT_HINTS = ("rate", "429", "500", "502", "503", "504", "overloaded", "ti
 def _is_overload_message(msg: str) -> bool:
     low = msg.lower()
     return any(h in low for h in ("503", "unavailable", "high demand", "overloaded", "timed out", "timeout",
-                                  "429", "resource_exhausted", "rate"))
+                                  "429", "resource_exhausted", "rate",
+                                  # model retired / not enabled for this key -> the fallback can still help
+                                  "no longer available", "not_found", "notfounderror"))
 
 
 def _is_timeout(exc: Exception) -> bool:

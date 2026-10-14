@@ -248,6 +248,22 @@ class FallbackModelTests(unittest.TestCase):
         sig = last["messages"][2]["tool_calls"][0]["extra_content"]["google"]["thought_signature"]
         self.assertEqual(sig, "skip_thought_signature_validator")  # old model's signature not reused
 
+    def test_fallback_when_model_not_available(self):
+        class NotFound(Exception):
+            status_code = 404
+
+        class Completions:
+            def create(self, **kwargs):
+                if kwargs["model"] == "retired":
+                    raise NotFound("Error code: 404 - This model is no longer available to new users.")
+                return NS(choices=[NS(message=NS(content="ok", tool_calls=None), finish_reason="stop")], usage=None)
+
+        fake = types.SimpleNamespace(OpenAI=lambda **kw: NS(chat=NS(completions=Completions())))
+        with mock.patch.dict(sys.modules, {"openai": fake}), mock.patch("sys.stderr"):
+            client = llm_mod.OpenAICompatibleClient("gemini", "k", "retired", None, fallback_model="current")
+            self.assertEqual(client.complete("SYS", [{"role": "user", "content": "go"}], TOOLS).text, "ok")
+        self.assertEqual(client.model, "current")
+
     def test_no_fallback_for_auth_errors(self):
         class AuthError(Exception):
             status_code = 401
