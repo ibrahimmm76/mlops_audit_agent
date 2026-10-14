@@ -95,6 +95,8 @@ Observe -> Reason -> Select tool -> Execute -> Interpret -> (repeat) -> Report.
 is the best next step. Decide your own investigation path; follow up on anything suspicious \
 (e.g. after inspect_workflows flags a step, read_file that workflow; after a search hit, read the surrounding lines).
 * Start broad (list_files, detect_project_tooling), then go deep where evidence points.
+* Be efficient: every turn costs an LLM request. Call SEVERAL tools in one turn whenever they are independent \
+(e.g. read_file on three files at once, or record_violation for every confirmed problem in a file at once).
 * Record each CONFIRMED violation immediately with record_violation. Withdraw it with withdraw_violation if later \
 evidence contradicts it.
 * When you have covered every category, call finish.
@@ -163,6 +165,9 @@ fails, re-check with tools if unsure, record anything important you missed, then
 
 BUDGET_WARNING = """NOTE: only {left} step(s) left in the budget. Record any remaining confirmed violations now \
 and call finish."""
+
+TIME_WARNING = """NOTE: most of the time budget is used. Stop exploring new areas: record every violation you have \
+already confirmed (several record_violation calls in one turn), then call finish with coverage notes."""
 
 NO_TOOL_NUDGE = """You did not call a tool. Continue the investigation with a tool call, or call finish \
 (with coverage notes) if you have covered every category."""

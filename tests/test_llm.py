@@ -113,7 +113,50 @@ class AdapterTests(unittest.TestCase):
                 raise RateLimit("rate limited")
             return "ok"
 
-        self.assertEqual(llm_mod._retrying(flaky, attempts=4, base_delay=0), "ok")
+        with mock.patch("audit_agent.llm.time.sleep") as sleep, mock.patch("sys.stderr"):
+            self.assertEqual(llm_mod._retrying(flaky, attempts=4, base_delay=0), "ok")
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [10.0, 20.0])  # patient 429 backoff
+
+    def test_rate_limit_honours_provider_retry_delay(self):
+        calls = {"n": 0}
+
+        class RateLimit(Exception):
+            status_code = 429
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RateLimit("Error code: 429 - RESOURCE_EXHAUSTED ... 'retryDelay': '23s'")
+            return "ok"
+
+        with mock.patch("audit_agent.llm.time.sleep") as sleep, mock.patch("sys.stderr"):
+            self.assertEqual(llm_mod._retrying(flaky), "ok")
+        self.assertEqual(sleep.call_args.args[0], 24.0)
+
+    def test_daily_quota_fails_fast_with_advice(self):
+        class RateLimit(Exception):
+            status_code = 429
+
+        def exhausted():
+            raise RateLimit("429 Quota exceeded for metric: generate_content_free_tier_requests, limit: PerDay")
+
+        with mock.patch("audit_agent.llm.time.sleep") as sleep, self.assertRaises(LLMError) as ctx:
+            llm_mod._retrying(exhausted)
+        self.assertIn("Daily API quota", str(ctx.exception))
+        sleep.assert_not_called()
+
+    def test_client_paces_requests(self):
+        class Completions:
+            def create(self, **kwargs):
+                return NS(choices=[NS(message=NS(content="ok", tool_calls=None), finish_reason="stop")], usage=None)
+
+        fake = types.SimpleNamespace(OpenAI=lambda **kw: NS(chat=NS(completions=Completions())))
+        with mock.patch.dict(sys.modules, {"openai": fake}), mock.patch("audit_agent.llm.time.sleep") as sleep:
+            client = llm_mod.OpenAICompatibleClient("gemini", "k", "m", None, min_interval=6)
+            client.complete("SYS", [{"role": "user", "content": "a"}], TOOLS)
+            client.complete("SYS", [{"role": "user", "content": "b"}], TOOLS)
+        self.assertEqual(sleep.call_count, 1)  # second request waited for the interval
+        self.assertGreater(sleep.call_args.args[0], 5.0)
 
 
 class TimeoutAndEffortTests(unittest.TestCase):

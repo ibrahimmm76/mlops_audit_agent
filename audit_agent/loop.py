@@ -62,6 +62,7 @@ class AuditAgent:
         self._coverage_ok = False
         self._review_done = False
         self._finished = False
+        self._time_warned = False
         self._coverage: dict[str, str] = {}
         self._summary = ""
         self.tool_calls = 0
@@ -85,7 +86,12 @@ class AuditAgent:
         stop_reason = "max_steps"
         step = 0
         for step in range(1, self.max_steps + 1):
-            if self.time_budget_s and time.monotonic() - started > self.time_budget_s:
+            elapsed = time.monotonic() - started
+            if self.time_budget_s and not self._time_warned and elapsed > 0.8 * self.time_budget_s:
+                self._time_warned = True
+                self.tracer.event("warning", message="80% of time budget used; asking the agent to wrap up")
+                self.messages.append({"role": "user", "content": prompts.TIME_WARNING})
+            if self.time_budget_s and elapsed > self.time_budget_s:
                 stop_reason = "time_budget"
                 self.tracer.event("warning", message="time budget exhausted; finalising with recorded findings")
                 break

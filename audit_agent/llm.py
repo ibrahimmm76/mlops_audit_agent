@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -93,11 +94,36 @@ def _is_overload_message(msg: str) -> bool:
                                   "no longer available", "not_found", "notfounderror"))
 
 
+def _is_rate_limit(status: object, low_msg: str) -> bool:
+    return status == 429 or "429" in low_msg or "resource_exhausted" in low_msg or "rate limit" in low_msg \
+        or "quota" in low_msg
+
+
+_RETRY_AFTER_RX = re.compile(r"retry(?:[ _-]?delay|[ _-]?after| in)?[\"']?\s*[:=]?\s*[\"']?(\d+(?:\.\d+)?)\s*s", re.I)
+
+
+def _retry_after(exc: Exception, low_msg: str) -> float | None:
+    """Seconds the provider asked us to wait (Retry-After header or Gemini retryDelay)."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    try:
+        value = headers.get("retry-after") if headers is not None else None
+        if value:
+            return min(max(float(value), 1.0), 120.0)
+    except (TypeError, ValueError, AttributeError):
+        pass
+    m = _RETRY_AFTER_RX.search(low_msg)
+    if m:
+        return min(max(float(m.group(1)) + 1.0, 1.0), 120.0)
+    return None
+
+
 def _is_timeout(exc: Exception) -> bool:
     return "timeout" in type(exc).__name__.lower() or "timed out" in str(exc).lower()
 
 
-def _retrying(fn, attempts: int = 6, base_delay: float = 2.0, max_timeouts: int = 2):  # noqa: ANN001,ANN202
+def _retrying(fn, attempts: int = 6, base_delay: float = 2.0, max_timeouts: int = 2,  # noqa: ANN001,ANN202
+              max_rate_limit_waits: int = 8):
     """Call ``fn`` with exponential backoff on transient provider errors.
 
     All retrying happens here (SDK-level retries are disabled) so the total wait
@@ -106,7 +132,8 @@ def _retrying(fn, attempts: int = 6, base_delay: float = 2.0, max_timeouts: int 
     """
     last: Exception | None = None
     timeouts = 0
-    for i in range(attempts):
+    rate_limited = 0
+    for i in range(attempts + max_rate_limit_waits + max_timeouts):
         try:
             return fn()
         except LLMError:
@@ -121,11 +148,24 @@ def _retrying(fn, attempts: int = 6, base_delay: float = 2.0, max_timeouts: int 
                     break
                 _notify(f"LLM request timed out; retrying ({timeouts}/{max_timeouts})")
                 continue
+            if _is_rate_limit(status, msg):
+                if "per day" in msg or "perday" in msg or "daily" in msg:
+                    raise LLMError("Daily API quota exhausted for this model/key. Wait until the quota resets, "
+                                   "or set LLM_MODEL to another model (see scripts/list_models.py).") from exc
+                rate_limited += 1
+                if rate_limited > max_rate_limit_waits:
+                    break
+                delay = _retry_after(exc, msg) or min(10.0 * (2 ** (rate_limited - 1)), 60.0)
+                _notify(f"rate limit reached (429); waiting {delay:.0f}s as requested by the provider "
+                        f"({rate_limited}/{max_rate_limit_waits})")
+                time.sleep(delay)
+                continue
             transient = (status in (408, 409, 429) or (isinstance(status, int) and status >= 500)
                          or any(h in msg for h in _TRANSIENT_HINTS))
-            if status in (400, 401, 403, 404) or not transient or i == attempts - 1:
+            transient_tries = i - rate_limited - timeouts
+            if status in (400, 401, 403, 404) or not transient or transient_tries >= attempts - 1:
                 break
-            delay = min(base_delay * (2 ** i), 40.0)  # free tiers have per-minute limits
+            delay = min(base_delay * (2 ** transient_tries), 40.0)
             _notify(f"LLM provider busy/rate-limited ({status or type(exc).__name__}); retrying in {delay:.0f}s")
             time.sleep(delay)
     raise LLMError(f"LLM request failed: {redact_text(type(last).__name__ + ': ' + str(last))[:500]}")
@@ -233,7 +273,8 @@ class AnthropicClient:
 class OpenAICompatibleClient:
     def __init__(self, provider: str, api_key: str | None, model: str, base_url: str | None,
                  max_tokens: int = 4096, timeout: float = 120.0, temperature: float | None = None,
-                 reasoning_effort: str | None = None, fallback_model: str | None = None) -> None:
+                 reasoning_effort: str | None = None, fallback_model: str | None = None,
+                 min_interval: float = 0.0) -> None:
         try:
             import openai  # noqa: PLC0415 - optional dependency, imported lazily
         except ImportError as exc:
@@ -247,6 +288,10 @@ class OpenAICompatibleClient:
         self.reasoning_effort = reasoning_effort or None
         # Used once if the primary model stays overloaded/unavailable, so a long audit is not lost.
         self.fallback_model = fallback_model if fallback_model and fallback_model != model else None
+        # Client-side pacing keeps free-tier keys under their requests-per-minute limit
+        # instead of repeatedly hitting 429 and backing off.
+        self.min_interval = max(0.0, float(min_interval or 0.0))
+        self._last_request = 0.0
         self._client = openai.OpenAI(api_key=api_key or "not-needed", base_url=base_url,
                                      timeout=timeout, max_retries=0)
 
@@ -291,6 +336,13 @@ class OpenAICompatibleClient:
             self.model, self.fallback_model = self.fallback_model, None
             return self._complete(system, messages, tools)
 
+    def _paced(self, kwargs: dict[str, Any]) -> Any:
+        wait = self._last_request + self.min_interval - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        self._last_request = time.monotonic()
+        return self._client.chat.completions.create(**kwargs)
+
     def _complete(self, system, messages, tools):  # noqa: ANN001,ANN202
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -305,7 +357,7 @@ class OpenAICompatibleClient:
         if self.reasoning_effort:
             kwargs["reasoning_effort"] = self.reasoning_effort
         try:
-            resp = _retrying(lambda: self._client.chat.completions.create(**kwargs))
+            resp = _retrying(lambda: self._paced(kwargs))
         except LLMError as exc:
             if "reasoning_effort" not in kwargs or "reasoning" not in str(exc).lower() or "400" not in str(exc):
                 raise
@@ -313,7 +365,7 @@ class OpenAICompatibleClient:
             _notify(f"model {self.model} rejected reasoning_effort; continuing without it")
             self.reasoning_effort = None
             kwargs.pop("reasoning_effort")
-            resp = _retrying(lambda: self._client.chat.completions.create(**kwargs))
+            resp = _retrying(lambda: self._paced(kwargs))
         if not resp.choices:
             raise LLMError("LLM returned no choices")
         choice = resp.choices[0]
@@ -381,4 +433,6 @@ def create_client(provider: str | None = None, model: str | None = None) -> LLMC
     return OpenAICompatibleClient(provider, api_key, model, base_url, max_tokens=max_tokens,
                                   timeout=timeout, temperature=temperature,
                                   reasoning_effort=effort.strip().lower() or None,
-                                  fallback_model=(os.getenv("LLM_FALLBACK_MODEL") or "").strip() or None)
+                                  fallback_model=(os.getenv("LLM_FALLBACK_MODEL") or "").strip() or None,
+                                  min_interval=float(os.getenv("LLM_MIN_INTERVAL") or
+                                                     ("6" if provider == "gemini" else "0")))
