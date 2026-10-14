@@ -1,0 +1,215 @@
+{
+  "repository": "https://github.com/ibrahimmm76/devops_tests",
+  "violations": [
+    {
+      "rule_id": "SEC-002",
+      "category": "security",
+      "severity": "critical",
+      "file": null,
+      "line": null,
+      "description": "Real credentials committed and persisted in git history (config/credentials.json)",
+      "evidence": "scan_secrets identified hardcoded_credential in config/credentials.json added in commit 6e0b40e and deleted in commit 45b2b4e",
+      "recommendation": "Rewrite git history using git-filter-repo or BFG Repo-Cleaner to purge historical credentials and rotate all leaked secrets."
+    },
+    {
+      "rule_id": "SEC-002",
+      "category": "security",
+      "severity": "critical",
+      "file": ".env",
+      "line": 2,
+      "description": "Secret-bearing .env file committed to version control with production database credentials and secret key",
+      "evidence": ".env contains environment variables with real credentials (lines 2-3)",
+      "recommendation": "Remove .env from version control, add .env to .gitignore, rotate compromised credentials, and use environment variables or secret management."
+    },
+    {
+      "rule_id": "SEC-004",
+      "category": "security",
+      "severity": "critical",
+      "file": ".github/workflows/deploy.yml",
+      "line": 5,
+      "description": "Dangerous pull_request_target workflow executing untrusted PR code with repo privileges",
+      "evidence": ".github/workflows/deploy.yml triggers on pull_request_target and checks out PR head sha (lines 5, 21)",
+      "recommendation": "Use standard pull_request trigger or avoid checking out and executing untrusted PR code in privileged workflows."
+    },
+    {
+      "rule_id": "SEC-006",
+      "category": "security",
+      "severity": "critical",
+      "file": ".github/workflows/deploy.yml",
+      "line": 25,
+      "description": "Secret printed to CI logs via echo command",
+      "evidence": ".github/workflows/deploy.yml prints registry token to stdout via echo \"Using token ${{ secrets.REGISTRY_TOKEN }}\" (line 25)",
+      "recommendation": "Remove print statements that expose secrets and rely on silent CLI authentication (e.g. --password-stdin)."
+    },
+    {
+      "rule_id": "SEC-001",
+      "category": "security",
+      "severity": "critical",
+      "file": "app/config.py",
+      "line": 8,
+      "description": "Hardcoded AWS access key ID and database password in source configuration",
+      "evidence": "app/config.py contains hardcoded AWS_ACCESS_KEY_ID and DB_PASSWORD (lines 8, 15)",
+      "recommendation": "Load credentials from environment variables using os.environ instead of hardcoding them in source code."
+    },
+    {
+      "rule_id": "BLD-002",
+      "category": "build_release",
+      "severity": "high",
+      "file": ".github/workflows/deploy.yml",
+      "line": 4,
+      "description": "Risky deployment automation running on every push without a test validation gate",
+      "evidence": ".github/workflows/deploy.yml triggers on push without requiring passing test jobs (line 4)",
+      "recommendation": "Require successful test workflow completion before allowing deployment jobs to run."
+    },
+    {
+      "rule_id": "CI-002",
+      "category": "ci",
+      "severity": "high",
+      "file": ".github/workflows/ci.yml",
+      "line": 5,
+      "description": "Incorrect CI trigger branch filter (configured for 'master' while repository default branch is 'main')",
+      "evidence": ".github/workflows/ci.yml triggers on push to branches: [master] (line 5)",
+      "recommendation": "Update branch filters to include 'main' or remove branch restriction to run on default branch pushes."
+    },
+    {
+      "rule_id": "SEC-003",
+      "category": "security",
+      "severity": "high",
+      "file": ".github/workflows/ci.yml",
+      "line": 8,
+      "description": "Over-privileged workflow token with write-all permissions",
+      "evidence": ".github/workflows/ci.yml sets permissions: write-all at top level (line 8)",
+      "recommendation": "Apply principle of least privilege by setting explicit minimum required permissions (e.g. contents: read)."
+    },
+    {
+      "rule_id": "SEC-005",
+      "category": "security",
+      "severity": "high",
+      "file": ".github/workflows/ci.yml",
+      "line": 26,
+      "description": "Script injection vulnerability via untrusted github.event data interpolated into run shell commands",
+      "evidence": ".github/workflows/ci.yml interpolates github.event.pull_request.title directly into bash run command (line 26)",
+      "recommendation": "Pass untrusted event data via environment variables instead of direct shell interpolation."
+    },
+    {
+      "rule_id": "SEC-007",
+      "category": "security",
+      "severity": "high",
+      "file": "app/storage.py",
+      "line": 27,
+      "description": "TLS verification disabled in HTTP client request (verify=False)",
+      "evidence": "app/storage.py calls requests.get with verify=False (line 27)",
+      "recommendation": "Enable TLS certificate verification (verify=True or provide CA bundle) to prevent man-in-the-middle attacks."
+    },
+    {
+      "rule_id": "SEC-007",
+      "category": "security",
+      "severity": "high",
+      "file": "scripts/deploy.sh",
+      "line": 5,
+      "description": "Insecure execution pattern piping remote script directly into bash (curl | sh)",
+      "evidence": "scripts/deploy.sh executes curl -fsSL https://get.example-deploy-tool.io/install.sh | bash (line 5)",
+      "recommendation": "Inspect, pin, or securely install deployment tools rather than piping remote scripts directly to bash."
+    },
+    {
+      "rule_id": "TST-004",
+      "category": "testing",
+      "severity": "high",
+      "file": ".github/workflows/ci.yml",
+      "line": 29,
+      "description": "Test failures masked in CI using || true",
+      "evidence": ".github/workflows/ci.yml runs pytest || true which hides test failures (line 29)",
+      "recommendation": "Remove || true so that test failures correctly fail the CI pipeline gate."
+    },
+    {
+      "rule_id": "TST-003",
+      "category": "testing",
+      "severity": "high",
+      "file": "tests/test_storage.py",
+      "line": 3,
+      "description": "Tests that cannot pass because they import a non-existent module",
+      "evidence": "tests/test_storage.py imports from app.legacy_cache which does not exist in the codebase (line 3)",
+      "recommendation": "Implement the missing module or remove the obsolete test import."
+    },
+    {
+      "rule_id": "BLD-003",
+      "category": "build_release",
+      "severity": "medium",
+      "file": "Dockerfile",
+      "line": 1,
+      "description": "Dockerfile uses latest base image, runs as root, and lacks .dockerignore while copying entire repository context",
+      "evidence": "Dockerfile uses FROM python:latest and lacks a .dockerignore file (lines 1, 4)",
+      "recommendation": "Pin base image to specific version (e.g. python:3.12-slim), run as a non-root user, and add a .dockerignore file."
+    },
+    {
+      "rule_id": "CI-005",
+      "category": "ci",
+      "severity": "medium",
+      "file": ".github/workflows/ci.yml",
+      "line": 32,
+      "description": "GitHub Action referenced by mutable branch reference instead of immutable commit hash or tagged version",
+      "evidence": ".github/workflows/ci.yml uses codecov/codecov-action@master (line 32)",
+      "recommendation": "Pin actions to specific immutable commit hashes or pinned semver tags (e.g. @v4)."
+    },
+    {
+      "rule_id": "CQ-003",
+      "category": "code_quality",
+      "severity": "medium",
+      "file": "app/storage.py",
+      "line": 30,
+      "description": "Obvious maintainability problem with bare except clause swallowing all errors",
+      "evidence": "app/storage.py uses a bare except: pass block (line 30)",
+      "recommendation": "Catch specific exceptions (e.g. requests.RequestException) rather than a bare except."
+    },
+    {
+      "rule_id": "CFG-002",
+      "category": "configuration",
+      "severity": "medium",
+      "file": ".vscode/settings.json",
+      "line": 1,
+      "description": "Committed local/IDE personal settings (.vscode/settings.json)",
+      "evidence": ".vscode/settings.json is tracked in git and contains local user paths (lines 1-5)",
+      "recommendation": "Add .vscode/ to .gitignore and remove it from repository tracking."
+    },
+    {
+      "rule_id": "CFG-001",
+      "category": "configuration",
+      "severity": "medium",
+      "file": "app/config.py",
+      "line": 19,
+      "description": "Machine-specific absolute path hardcoded in configuration and IDE settings",
+      "evidence": "app/config.py defines UPLOAD_DIR with a Windows absolute path C:\\Users\\ibrahim\\... (line 19)",
+      "recommendation": "Use relative paths or environment-configurable path variables instead of hardcoded local user absolute paths."
+    },
+    {
+      "rule_id": "DEP-003",
+      "category": "dependency_management",
+      "severity": "medium",
+      "file": "requirements.txt",
+      "line": 1,
+      "description": "Inconsistent and conflicting package specifications across requirements.txt and pyproject.toml",
+      "evidence": "requirements.txt specifies requests>=2.31 and unpinned flask, whereas pyproject.toml specifies requests==2.25.1 and flask==3.0.3 (requirements.txt line 1)",
+      "recommendation": "Consolidate dependencies into a single manifest (pyproject.toml or requirements.txt) with consistent version constraints."
+    },
+    {
+      "rule_id": "HYG-002",
+      "category": "repository_hygiene",
+      "severity": "medium",
+      "file": ".gitignore",
+      "line": 1,
+      "description": ".gitignore is incomplete and fails to exclude common generated files, virtualenvs, logs, and secret files",
+      "evidence": ".gitignore only lists *.tmp and node_modules/ (lines 1-2)",
+      "recommendation": "Update .gitignore to exclude Python bytecode (__pycache__, *.pyc), logs/, .env, and .vscode/."
+    },
+    {
+      "rule_id": "HYG-003",
+      "category": "repository_hygiene",
+      "severity": "medium",
+      "file": "logs/app.log",
+      "line": null,
+      "description": "Generated/temporary files tracked in git (Python bytecode and application log file)",
+      "evidence": "app/__pycache__/storage.cpython-312.pyc and logs/app.log are tracked in version control",
+      "recommendation": "Remove logs/, bytecode caches, and build artifacts from git history and tracking."
+    }
+  ]
+}
