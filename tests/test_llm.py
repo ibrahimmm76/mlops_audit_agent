@@ -307,6 +307,26 @@ class FallbackModelTests(unittest.TestCase):
             self.assertEqual(client.complete("SYS", [{"role": "user", "content": "go"}], TOOLS).text, "ok")
         self.assertEqual(client.model, "current")
 
+    def test_fallback_list_on_daily_quota(self):
+        tried = []
+
+        class RateLimit(Exception):
+            status_code = 429
+
+        class Completions:
+            def create(self, **kwargs):
+                tried.append(kwargs["model"])
+                if kwargs["model"] in ("a", "b"):
+                    raise RateLimit("429 Quota exceeded ... limit: PerDay")
+                return NS(choices=[NS(message=NS(content="ok", tool_calls=None), finish_reason="stop")], usage=None)
+
+        fake = types.SimpleNamespace(OpenAI=lambda **kw: NS(chat=NS(completions=Completions())))
+        with mock.patch.dict(sys.modules, {"openai": fake}), mock.patch("sys.stderr"):
+            client = llm_mod.OpenAICompatibleClient("gemini", "k", "a", None, fallback_model="b, c")
+            self.assertEqual(client.complete("SYS", [{"role": "user", "content": "go"}], TOOLS).text, "ok")
+        self.assertEqual(tried, ["a", "b", "c"])
+        self.assertEqual(client.model, "c")
+
     def test_no_fallback_for_auth_errors(self):
         class AuthError(Exception):
             status_code = 401

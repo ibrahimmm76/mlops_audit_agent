@@ -52,7 +52,7 @@ Edit `.env` and fill in **one** provider:
 | OpenRouter | `LLM_PROVIDER=openrouter`, `OPENROUTER_API_KEY=...` | set `LLM_MODEL` |
 | Ollama (local) | `LLM_PROVIDER=ollama` (no key) | `qwen2.5:14b` |
 
-`LLM_MODEL=` overrides the default model, and `LLM_FALLBACK_MODEL=` names a backup that is switched to automatically if the main model is overloaded (HTTP 503) or keeps timing out. `python scripts/list_models.py` lists the models your key can use. On free-tier keys the agent paces itself (`LLM_MIN_INTERVAL`, 6 s by default for Gemini). On a 429 it waits for the delay the provider asks for, and if the daily quota is used up it stops with a clear message. If `LLM_PROVIDER` is empty, the first provider whose key is
+`LLM_MODEL=` overrides the default model, and `LLM_FALLBACK_MODEL=` takes one or more backup models (comma-separated). They are tried in order if the main model is overloaded (HTTP 503), out of quota (free-tier quotas are per model), retired, or keeps timing out. `python scripts/list_models.py` lists the models your key can use. On free-tier keys the agent paces itself (`LLM_MIN_INTERVAL`, 6 s by default for Gemini). On a 429 it waits for the delay the provider asks for, and if the daily quota is used up it stops with a clear message. If `LLM_PROVIDER` is empty, the first provider whose key is
 set is used. `.env` is git-ignored; never commit real keys.
 
 ## 3. Execution

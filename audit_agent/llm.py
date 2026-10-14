@@ -91,7 +91,9 @@ def _is_overload_message(msg: str) -> bool:
     return any(h in low for h in ("503", "unavailable", "high demand", "overloaded", "timed out", "timeout",
                                   "429", "resource_exhausted", "rate",
                                   # model retired / not enabled for this key -> the fallback can still help
-                                  "no longer available", "not_found", "notfounderror"))
+                                  "no longer available", "not_found", "notfounderror",
+                                  # free-tier quotas are per model, so another model may still have quota
+                                  "quota"))
 
 
 def _is_rate_limit(status: object, low_msg: str) -> bool:
@@ -286,8 +288,11 @@ class OpenAICompatibleClient:
         # Thinking models (e.g. Gemini 3.x) can spend minutes "thinking" per call; the agent makes
         # many small decisions, so low effort keeps each step fast. Dropped automatically if rejected.
         self.reasoning_effort = reasoning_effort or None
+        self._initial_effort = self.reasoning_effort
         # Used once if the primary model stays overloaded/unavailable, so a long audit is not lost.
-        self.fallback_model = fallback_model if fallback_model and fallback_model != model else None
+        # LLM_FALLBACK_MODEL may be a comma-separated list; each is tried in turn.
+        self.fallback_models = [m.strip() for m in (fallback_model or "").split(",")
+                                if m.strip() and m.strip() != model]
         # Client-side pacing keeps free-tier keys under their requests-per-minute limit
         # instead of repeatedly hitting 429 and backing off.
         self.min_interval = max(0.0, float(min_interval or 0.0))
@@ -327,14 +332,20 @@ class OpenAICompatibleClient:
         return out
 
     def complete(self, system, messages, tools):  # noqa: ANN001,ANN201
-        try:
-            return self._complete(system, messages, tools)
-        except LLMError as exc:
-            if not self.fallback_model or not _is_overload_message(str(exc)):
-                raise
-            _notify(f"model {self.model} unavailable; switching to fallback model {self.fallback_model}")
-            self.model, self.fallback_model = self.fallback_model, None
-            return self._complete(system, messages, tools)
+        while True:
+            try:
+                return self._complete(system, messages, tools)
+            except LLMError as exc:
+                if not self.fallback_models or not _is_overload_message(str(exc)):
+                    raise
+                nxt = self.fallback_models.pop(0)
+                _notify(f"model {self.model} unavailable ({str(exc)[:80]}); switching to fallback model {nxt}")
+                self.model = nxt
+                self.reasoning_effort = self._initial_effort  # re-detect support on the new model
+
+    @property
+    def fallback_model(self) -> str | None:
+        return self.fallback_models[0] if self.fallback_models else None
 
     def _paced(self, kwargs: dict[str, Any]) -> Any:
         wait = self._last_request + self.min_interval - time.monotonic()
