@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,9 @@ def make_repo(files: dict[str, str | bytes], branch: str = "main", extra_commits
     _git(root, "init", "-q", "-b", branch)
     _git(root, "config", "user.email", "test@example.com")
     _git(root, "config", "user.name", "Test")
+    # Byte-exact checkouts on every OS (Git for Windows enables autocrlf system-wide).
+    _git(root, "config", "core.autocrlf", "false")
+    _git(root, "config", "core.safecrlf", "false")
     _write(root, files)
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "initial commit", "--allow-empty")
@@ -45,11 +49,14 @@ def _write(root: Path, files: dict[str, str | bytes]) -> None:
         if isinstance(content, bytes):
             p.write_bytes(content)
         else:
-            p.write_text(content, encoding="utf-8")
+            p.write_bytes(content.encode("utf-8"))  # always LF, even on Windows
 
 
 def _git(root: Path, *args: str) -> str:
-    return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True).stdout
+    # Same environment the tools use (system git config ignored), so the repo
+    # looks identical to the code under test on Windows, macOS and Linux.
+    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"}
+    return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True, env=env).stdout
 
 
 class ScriptedLLM:

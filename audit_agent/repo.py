@@ -89,6 +89,7 @@ def clone_repository(ref: RepoRef, timeout: int = 300, depth: int = 200) -> Path
         "-c", "protocol.file.allow=never",
         "-c", "core.symlinks=true",
         "clone",
+        "--config", "core.autocrlf=false",
         "--depth", str(depth),
         "--no-tags",
         "--single-branch",
