@@ -17,6 +17,7 @@ No agent framework is used.  The loop:
 from __future__ import annotations
 
 import json
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -132,12 +133,18 @@ class AuditAgent:
     # ------------------------------------------------------------------ #
     def _call_llm(self) -> LLMResponse:
         system = prompts.SYSTEM_PROMPT
+        t0 = time.monotonic()
+        if self.tracer.verbose:
+            print(f"  ... waiting for {getattr(self.llm, 'provider', 'LLM')} (step decision)",
+                  file=sys.stderr, flush=True)
         try:
             resp = self.llm.complete(system, self.messages, self._schemas)
         except LLMError:
             raise
         except Exception as exc:  # defensive: never leak provider internals/keys
             raise LLMError(redact_text(f"{type(exc).__name__}: {exc}")[:500]) from exc
+        self.tracer.event("llm_call", duration_s=round(time.monotonic() - t0, 2),
+                          tool_calls=[c.name for c in resp.tool_calls], usage=resp.usage)
         for k, v in (resp.usage or {}).items():
             self.usage[k] = self.usage.get(k, 0) + int(v or 0)
         return resp

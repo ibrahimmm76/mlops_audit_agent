@@ -116,6 +116,59 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(llm_mod._retrying(flaky, attempts=4, base_delay=0), "ok")
 
 
+class TimeoutAndEffortTests(unittest.TestCase):
+    def test_timeouts_retried_but_bounded(self):
+        calls = {"n": 0}
+
+        class APITimeoutError(Exception):
+            pass
+
+        def slow():
+            calls["n"] += 1
+            raise APITimeoutError("Request timed out.")
+
+        with mock.patch("sys.stderr"), self.assertRaises(LLMError):
+            llm_mod._retrying(slow, attempts=6, base_delay=0, max_timeouts=2)
+        self.assertEqual(calls["n"], 3)  # first try + 2 retries, then give up
+
+    def test_timeout_then_success(self):
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("timed out")
+            return "ok"
+
+        with mock.patch("sys.stderr"):
+            self.assertEqual(llm_mod._retrying(flaky, base_delay=0), "ok")
+
+    def test_reasoning_effort_sent_and_dropped_if_rejected(self):
+        sent = []
+
+        class BadRequest(Exception):
+            status_code = 400
+
+        class Completions:
+            def create(self, **kwargs):
+                sent.append(dict(kwargs))
+                if "reasoning_effort" in kwargs:
+                    raise BadRequest("Error code: 400 - unknown field reasoning_effort")
+                call = NS(id="t1", function=NS(name="list_files", arguments="{}"))
+                return NS(choices=[NS(message=NS(content="", tool_calls=[call]), finish_reason="tool_calls")],
+                          usage=None)
+
+        fake = types.SimpleNamespace(OpenAI=lambda **kw: NS(chat=NS(completions=Completions())))
+        with mock.patch.dict(sys.modules, {"openai": fake}), mock.patch("sys.stderr"):
+            client = llm_mod.OpenAICompatibleClient("gemini", "k", "m", None, reasoning_effort="low")
+            resp = client.complete("SYS", CONVERSATION, TOOLS)
+            client.complete("SYS", CONVERSATION, TOOLS)
+        self.assertEqual(sent[0]["reasoning_effort"], "low")
+        self.assertNotIn("reasoning_effort", sent[1])
+        self.assertNotIn("reasoning_effort", sent[2])  # remembered for later calls
+        self.assertEqual(resp.tool_calls[0].name, "list_files")
+
+
 class FactoryTests(unittest.TestCase):
     def test_missing_configuration(self):
         env = {k: "" for k in ("LLM_PROVIDER", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -77,13 +78,23 @@ PROVIDERS: dict[str, dict[str, str | None]] = {
     "ollama": {"key_env": None, "base_url": "http://localhost:11434/v1", "model": "qwen2.5:14b"},
 }
 
-_TRANSIENT_HINTS = ("rate", "429", "500", "502", "503", "504", "overloaded", "timeout", "temporarily",
-                    "connection")
+_TRANSIENT_HINTS = ("rate", "429", "500", "502", "503", "504", "overloaded", "timeout", "timed out",
+                    "temporarily", "connection", "unavailable", "resource_exhausted")
 
 
-def _retrying(fn, attempts: int = 6, base_delay: float = 2.0):  # noqa: ANN001,ANN202
-    """Call ``fn`` with exponential backoff on transient provider errors."""
+def _is_timeout(exc: Exception) -> bool:
+    return "timeout" in type(exc).__name__.lower() or "timed out" in str(exc).lower()
+
+
+def _retrying(fn, attempts: int = 6, base_delay: float = 2.0, max_timeouts: int = 2):  # noqa: ANN001,ANN202
+    """Call ``fn`` with exponential backoff on transient provider errors.
+
+    All retrying happens here (SDK-level retries are disabled) so the total wait
+    stays bounded. Timeouts are retried at most ``max_timeouts`` times because
+    each one already costs the full request timeout.
+    """
     last: Exception | None = None
+    timeouts = 0
     for i in range(attempts):
         try:
             return fn()
@@ -93,12 +104,24 @@ def _retrying(fn, attempts: int = 6, base_delay: float = 2.0):  # noqa: ANN001,A
             last = exc
             msg = str(exc).lower()
             status = getattr(exc, "status_code", None)
+            if _is_timeout(exc):
+                timeouts += 1
+                if timeouts > max_timeouts:
+                    break
+                _notify(f"LLM request timed out; retrying ({timeouts}/{max_timeouts})")
+                continue
             transient = (status in (408, 409, 429) or (isinstance(status, int) and status >= 500)
                          or any(h in msg for h in _TRANSIENT_HINTS))
             if status in (400, 401, 403, 404) or not transient or i == attempts - 1:
                 break
-            time.sleep(min(base_delay * (2 ** i), 40.0))  # free tiers have per-minute limits
+            delay = min(base_delay * (2 ** i), 40.0)  # free tiers have per-minute limits
+            _notify(f"LLM provider busy/rate-limited ({status or type(exc).__name__}); retrying in {delay:.0f}s")
+            time.sleep(delay)
     raise LLMError(f"LLM request failed: {redact_text(type(last).__name__ + ': ' + str(last))[:500]}")
+
+
+def _notify(msg: str) -> None:
+    print(f"  ... {msg}", file=sys.stderr, flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -113,7 +136,7 @@ class AnthropicClient:
             import anthropic  # noqa: PLC0415 - optional dependency, imported lazily
         except ImportError as exc:
             raise LLMError("The 'anthropic' package is not installed: pip install -r requirements.txt") from exc
-        self._client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=2)
+        self._client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=0)
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
@@ -184,7 +207,8 @@ class AnthropicClient:
 # --------------------------------------------------------------------------- #
 class OpenAICompatibleClient:
     def __init__(self, provider: str, api_key: str | None, model: str, base_url: str | None,
-                 max_tokens: int = 4096, timeout: float = 120.0, temperature: float | None = None) -> None:
+                 max_tokens: int = 4096, timeout: float = 120.0, temperature: float | None = None,
+                 reasoning_effort: str | None = None) -> None:
         try:
             import openai  # noqa: PLC0415 - optional dependency, imported lazily
         except ImportError as exc:
@@ -193,8 +217,11 @@ class OpenAICompatibleClient:
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
+        # Thinking models (e.g. Gemini 3.x) can spend minutes "thinking" per call; the agent makes
+        # many small decisions, so low effort keeps each step fast. Dropped automatically if rejected.
+        self.reasoning_effort = reasoning_effort or None
         self._client = openai.OpenAI(api_key=api_key or "not-needed", base_url=base_url,
-                                     timeout=timeout, max_retries=2)
+                                     timeout=timeout, max_retries=0)
 
     @staticmethod
     def _convert(system: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -226,7 +253,18 @@ class OpenAICompatibleClient:
         }
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
-        resp = _retrying(lambda: self._client.chat.completions.create(**kwargs))
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        try:
+            resp = _retrying(lambda: self._client.chat.completions.create(**kwargs))
+        except LLMError as exc:
+            if "reasoning_effort" not in kwargs or "reasoning" not in str(exc).lower() or "400" not in str(exc):
+                raise
+            # This model does not support reasoning_effort: remember that and retry without it.
+            _notify(f"model {self.model} rejected reasoning_effort; continuing without it")
+            self.reasoning_effort = None
+            kwargs.pop("reasoning_effort")
+            resp = _retrying(lambda: self._client.chat.completions.create(**kwargs))
         if not resp.choices:
             raise LLMError("LLM returned no choices")
         choice = resp.choices[0]
@@ -276,7 +314,7 @@ def create_client(provider: str | None = None, model: str | None = None) -> LLMC
     if key_env and not api_key:
         raise LLMError(f"{key_env} is not set (required for LLM_PROVIDER={provider}).")
     max_tokens = int(os.getenv("LLM_MAX_TOKENS", "8192"))
-    timeout = float(os.getenv("LLM_TIMEOUT", "120"))
+    timeout = float(os.getenv("LLM_TIMEOUT", "300"))
     temp_env = os.getenv("LLM_TEMPERATURE")
     temperature = float(temp_env) if temp_env not in (None, "") else None
 
@@ -284,5 +322,9 @@ def create_client(provider: str | None = None, model: str | None = None) -> LLMC
         return AnthropicClient(api_key or "", model, max_tokens=max_tokens, timeout=timeout,
                                temperature=temperature)
     base_url = os.getenv("LLM_BASE_URL") or cfg["base_url"]
+    effort = os.getenv("LLM_REASONING_EFFORT")
+    if effort is None:
+        effort = "low" if provider in ("gemini", "openai") else ""
     return OpenAICompatibleClient(provider, api_key, model, base_url, max_tokens=max_tokens,
-                                  timeout=timeout, temperature=temperature)
+                                  timeout=timeout, temperature=temperature,
+                                  reasoning_effort=effort.strip().lower() or None)
