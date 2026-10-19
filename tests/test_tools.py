@@ -249,6 +249,34 @@ class ToolTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_scan_secrets_separates_docs_and_tests_from_real_config(self):
+        real = "Pr0d" + "Pa55w0rd!x"
+        root = make_repo({
+            "docs/guide.md": "Use a proxy: http://user:pass@host:8080 and SECRET_KEY = 'dev'\n",
+            "tests/test_cfg.py": 'SECRET_KEY = "test key"\nTOKEN = "abc" + "defghijkl"\n',
+            "package.json": '{"dependencies": {"pbkdf2-password": "1.2.1"}}\n',
+            "app/settings.py": f'DB_PASSWORD = "{real}"\n',
+        })
+        try:
+            out = RepoTools(root).scan_secrets()
+            self.assertIn("1 likely real credential(s) in source/config files", out)
+            self.assertIn("app/settings.py:1", out)
+            self.assertNotIn("package.json", out)
+            self.assertNotIn("docs/guide.md:1: connection", out.split("tests/docs/examples")[0])
+            self.assertNotIn(real, out)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_scan_secrets_fast_on_huge_minified_line(self):
+        import time
+        root = make_repo({"static/app.min.js": "var a" + "_password_x" * 40000 + "=1;\n"})
+        try:
+            t0 = time.time()
+            RepoTools(root).scan_secrets()
+            self.assertLess(time.time() - t0, 5.0)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_specs_have_schemas(self):
         names = {s.name for s in self.bad.specs()}
         self.assertTrue({"list_files", "read_file", "search_code", "git_log"} <= names)

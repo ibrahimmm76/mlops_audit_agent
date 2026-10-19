@@ -45,6 +45,7 @@ _KNOWN_PATTERNS: list[tuple[str, re.Pattern[str], int]] = [
 # key = "value" style assignments where the key name suggests a credential.
 _ASSIGNMENT = re.compile(
     r"""(?ix)
+    (?<![A-Za-z0-9_.\-])            # start at a token boundary (avoids quadratic backtracking)
     (?P<key>[A-Za-z0-9_.\-]*?
         (?:password|passwd|pwd|secret|token|api[_\-]?key|apikey|access[_\-]?key|
            private[_\-]?key|client[_\-]?secret|auth[_\-]?key|credentials?)
@@ -74,6 +75,8 @@ _PLACEHOLDER_HINTS = (
     "env(", "process.env", "secrets.", "vault:", "replace_me", "replace-me", "insert", "....",
 )
 
+
+_GENERIC_SCAN_LIMIT = 4000
 
 _GENERIC_KINDS = {"hardcoded_credential", "env_credential", "connection_string_password"}
 
@@ -130,14 +133,17 @@ def find_secrets(text: str) -> list[SecretHit]:
         for m in pattern.finditer(text):
             add(kind, m, group)
 
-    for m in _ASSIGNMENT.finditer(text):
+    # Generic key=value detection is only run on the first part of very long (minified) lines;
+    # the specific credential formats above are always checked across the whole text.
+    generic_text = text if len(text) <= _GENERIC_SCAN_LIMIT else text[:_GENERIC_SCAN_LIMIT]
+    for m in _ASSIGNMENT.finditer(generic_text):
         value = m.group("value")
         # Skip code references such as  password = "{password}"  or  token = "TOKEN"
         if value.isupper() and "_" not in value and len(value) < 12:
             continue
         add("hardcoded_credential", m, "value")
 
-    for line_match in re.finditer(r"[^\n]+", text):
+    for line_match in re.finditer(r"[^\n]+", generic_text):
         line = line_match.group(0)
         m = _ENV_ASSIGNMENT.match(line)
         if not m:

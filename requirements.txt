@@ -1,6 +1,7 @@
-# Runtime dependencies (Python >= 3.11). Only basic LLM provider SDKs - no agent frameworks.
+# Runtime dependencies (Python >= 3.10). Only basic LLM provider SDKs - no agent frameworks.
 anthropic>=0.40,<2
 openai>=1.40,<3
 PyYAML>=6.0,<7
 python-dotenv>=1.0,<2
 ruff>=0.5,<1
+tomli>=2.0,<3; python_version < "3.11"

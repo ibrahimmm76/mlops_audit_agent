@@ -19,7 +19,7 @@ python agent.py --repo <github_repository_url> --output report.json
 
 ## 1. Installation
 
-Requirements: **Python 3.11+** and **git** on `PATH`.
+Requirements: **Python 3.10+** and **git** on `PATH`.
 
 ```bash
 git clone https://github.com/ibrahimmm76/mlops_audit_agent.git
@@ -241,7 +241,7 @@ with injected defects exercise every tool. They cover:
 * the CLI end to end: valid report and trace, empty-violations report, non-zero exits for invalid URL,
   clone failure and LLM errors.
 
-CI (`.github/workflows/ci.yml`) runs ruff, pytest and a CLI smoke test on Python 3.11 to 3.13.
+CI (`.github/workflows/ci.yml`) runs ruff, pytest and a CLI smoke test on Python 3.10 to 3.13.
 
 ## 6. Self-evaluation (precision / recall)
 

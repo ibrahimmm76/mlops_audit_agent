@@ -28,7 +28,14 @@ import re
 import shutil
 import subprocess
 import time
-import tomllib
+
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10: use the tomli backport if present
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -483,8 +490,11 @@ class RepoTools:
             text = self._read_text(rel) or ""
             self._observe(rel, [])
             try:
-                data = tomllib.loads(text)
-            except tomllib.TOMLDecodeError as exc:
+                data = _toml_loads(text)
+            except _TomlUnavailable:
+                report.append(f"{rel}: could not be parsed on this Python (no TOML parser); not checked")
+                continue
+            except ValueError as exc:
                 report.append(f"{rel}: INVALID TOML ({exc})")
                 continue
             project = data.get("project", {}) or {}
@@ -626,8 +636,8 @@ class RepoTools:
         pyproject_tools: set[str] = set()
         for rel in (f for f in files if f.endswith("pyproject.toml")):
             try:
-                pyproject_tools |= set((tomllib.loads(self._read_text(rel) or "").get("tool") or {}).keys())
-            except tomllib.TOMLDecodeError:
+                pyproject_tools |= set((_toml_loads(self._read_text(rel) or "").get("tool") or {}).keys())
+            except ValueError:
                 pass
         cfg_text = ""
         for rel in ("setup.cfg", "tox.ini"):
@@ -691,27 +701,38 @@ class RepoTools:
 
     def scan_secrets(self, path_glob: str | None = None) -> str:
         """Scan tracked files for credentials. Values are never shown."""
-        hits: list[str] = []
+        hits: list[str] = []          # source/config files: likely real
+        illustrative: list[str] = []  # tests, docs, examples: usually fake/example values
         placeholders = 0
         for rel in self._text_files(path_glob):
             text = self._read_text(rel)
-            if text is None:
+            if text is None or not _SECRET_PREFILTER.search(text):  # fast skip for large repos
                 continue
+            example_file = _is_test_path(rel) or _is_doc_path(rel)
             for no, line in enumerate(text.splitlines(), start=1):
+                if not _SECRET_PREFILTER.search(line):
+                    continue
                 for h in find_secrets(line):
-                    if h.placeholder:
+                    if h.placeholder or _is_example_value(h.kind, h.value):
                         placeholders += 1
                         continue
                     self.secret_values.add(h.value)
                     self._observe(rel, [no])
-                    where = "  [in test code - often a fake fixture value; verify]" if _is_test_path(rel) else ""
-                    hits.append(f"{rel}:{no}: {h.kind} -> {redact_text(line.strip())[:200]}{where}")
+                    entry = f"{rel}:{no}: {h.kind} -> {redact_text(line.strip())[:200]}"
+                    (illustrative if example_file else hits).append(entry)
         secret_rx = dict(GENERATED_PATTERNS)["local env/secret file"]
         sensitive = [f for f in self.tracked_files()
                      if secret_rx.search(f) and not _ENV_TEMPLATE.search(f)]
-        out = [f"{len(hits)} likely real credential(s) found (values redacted):"] + hits[:60]
+        out = [f"{len(hits)} likely real credential(s) in source/config files (values redacted):"] + hits[:60]
         if len(hits) > 60:
             out.append(f"... {len(hits) - 60} more")
+        if illustrative:
+            out.append(f"\n{len(illustrative)} credential-looking value(s) in tests/docs/examples. These are USUALLY "
+                       "illustrative fixtures and NOT violations; report one only if it is clearly a real, "
+                       "live credential (e.g. a real provider key format in an example config):")
+            out.extend(f"  {h}" for h in illustrative[:15])
+            if len(illustrative) > 15:
+                out.append(f"  ... {len(illustrative) - 15} more")
         if placeholders:
             out.append(f"({placeholders} placeholder-looking values ignored, e.g. 'changeme', '${{VAR}}', 'your-key')")
         if sensitive:
@@ -1205,6 +1226,46 @@ def _local_python_modules(py_files: list[str]) -> set[str]:
             for i in range(1, len(variant) + 1):
                 mods.add(".".join(variant[:i]))
     return mods
+
+
+_SECRET_PREFILTER = re.compile(
+    r"(?i)key|secret|pass|pwd|token|credential|auth|://|-----BEGIN|AKIA|ASIA|gh[pousr]_|github_pat|glpat|xox|"
+    r"AIza|sk-|sk_live|rk_live|eyJ|SG\.|hooks\.slack")
+
+_DOC_RX = re.compile(r"(^|/)(docs?|docs?[_-]\w+|documentation|examples?|samples?|tutorials?|demos?)/|"
+                     r"\.(md|rst|txt|adoc)$|(^|/)(README|CHANGELOG|HISTORY|CHANGES)[^/]*$", re.I)
+
+# Values that are illustrative words rather than secrets, for the generic (key=value) detectors only.
+_EXAMPLE_WORDS = {"pass", "password", "passwd", "secret", "test", "testing", "dev", "development", "key",
+                  "token", "admin", "root", "user", "username", "foo", "bar", "baz", "qux", "example", "sample",
+                  "demo", "default", "changeit", "letmein", "abc123", "123456", "1234", "12345678", "pwd",
+                  "secret key", "test key", "dev key", "my secret", "mysecret", "supersecret", "s3cr3t", "hunter2"}
+_VERSION_SPEC = re.compile(r"[\^~>=<!]*\s*v?\d+(\.[\dx*]+)*([-+.][\w.]+)?|[*x]|latest")
+_GENERIC_SECRET_KINDS = {"hardcoded_credential", "env_credential", "connection_string_password"}
+
+
+class _TomlUnavailable(ValueError):
+    """No TOML parser on this Python (3.10 without the tomli backport)."""
+
+
+def _toml_loads(text: str) -> dict[str, Any]:
+    """Parse TOML; raises ValueError on invalid TOML, _TomlUnavailable if no parser exists."""
+    if tomllib is None:
+        raise _TomlUnavailable("TOML parsing unavailable on this Python (install 'tomli' or use Python 3.11+)")
+    return tomllib.loads(text)  # TOMLDecodeError is a ValueError subclass
+
+
+def _is_example_value(kind: str, value: str) -> bool:
+    if kind not in _GENERIC_SECRET_KINDS:
+        return False  # real credential FORMATS (AWS, GitHub, private keys...) are always reported
+    v = value.strip().strip("'\"").lower()
+    if _VERSION_SPEC.fullmatch(v):  # e.g. "pbkdf2-password": "1.2.1" in package.json is a dependency
+        return True
+    return v in _EXAMPLE_WORDS or (len(v) <= 6 and v.isalpha()) or v.startswith(("fake", "dummy", "example"))
+
+
+def _is_doc_path(rel: str) -> bool:
+    return bool(_DOC_RX.search(rel))
 
 
 def _is_test_path(rel: str) -> bool:
